@@ -1,0 +1,1 @@
+"""FEM stiffness matrix assembly."""
