@@ -42,6 +42,7 @@ dependencies = [
     "optimistix>=0.0.5",
     "jaxtyping>=0.2.24",
     "numpy>=1.26.0",
+    "h5py>=3.8.0",
 ]
 
 [project.optional-dependencies]
