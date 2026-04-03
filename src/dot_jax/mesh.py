@@ -3,6 +3,20 @@
 JAX-native tetrahedral mesh module. FEMMesh is an Equinox Module holding
 precomputed mesh operators. All indices are 0-based (dot-jax convention).
 
+The deldotdel computation implements the standard linear tetrahedral
+element gradient products used in FEM for the diffusion equation,
+following the formulation in Arridge et al. (1993) and the
+implementation in redbirdpy/redbird-m (Fang, 2009).
+
+References
+----------
+.. [1] S. R. Arridge, M. Schweiger, M. Hiraoka, and D. T. Delpy,
+       "A finite element approach for modeling photon transport in
+       tissue," Med. Phys., vol. 20, no. 2, pp. 299-309, 1993.
+.. [2] Q. Fang, "Mesh-based Monte Carlo method using fast ray-tracing
+       in Plucker coordinates," Biomed. Opt. Express, vol. 1, no. 1,
+       pp. 165-175, 2010.
+
 Functions:
     compute_evol: Element volumes for tetrahedra
     compute_face_area: Triangle face areas

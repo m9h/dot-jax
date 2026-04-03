@@ -5,6 +5,24 @@ JAX-native optical property functions for DOT/fNIRS. Setup functions
 Core math (mua_from_concentrations, musp_from_scattering, musp2sasp)
 is JIT-compatible and differentiable.
 
+Hemoglobin extinction data compiled by Scott Prahl from the Oregon
+Medical Laser Center (OMLC). Water absorption from Hale & Querry (1973).
+The scattering power-law model follows Mourant et al. (1997).
+
+References
+----------
+.. [1] S. Prahl, "Optical absorption of hemoglobin," Oregon Medical
+       Laser Center, https://omlc.org/spectra/hemoglobin/, 1999.
+.. [2] G. M. Hale and M. R. Querry, "Optical constants of water in
+       the 200-nm to 200-um wavelength region," Appl. Opt., vol. 12,
+       pp. 555-563, 1973.
+.. [3] J. R. Mourant et al., "Predictions and measurements of
+       scattering and absorption over broad wavelength ranges in
+       tissue phantoms," Appl. Opt., vol. 36, pp. 949-957, 1997.
+.. [4] S. J. Matcher, M. Cope, and D. T. Delpy, "In vivo measurements
+       of the wavelength dependence of tissue-scattering coefficients,"
+       Appl. Opt., vol. 36, pp. 386-396, 1997.
+
 Functions:
     extinction: Molar extinction coefficients via scipy interpolation
     get_chromophore_table: Raw chromophore lookup table

@@ -1,7 +1,26 @@
 """FEM stiffness matrix assembly.
 
-JAX-native assembly of the CW diffusion system matrix A = K + M + C.
-All functions are JIT-compatible and differentiable via jax.grad.
+JAX-native assembly of the CW diffusion system matrix A = K + M + C
+for the photon diffusion equation:
+
+    -div(D grad(phi)) + mua * phi = S
+
+Discretised with linear tetrahedral elements. The stiffness matrix K
+encodes diffusion, M encodes absorption via consistent mass, and C
+enforces the Robin (type III) boundary condition. Cross-validated
+against redbirdpy's ``femlhs``.
+
+The Robin BC follows Haskell et al. (1994) using the effective
+reflection coefficient for the extrapolated boundary.
+
+References
+----------
+.. [1] S. R. Arridge, M. Schweiger, M. Hiraoka, and D. T. Delpy,
+       "A finite element approach for modeling photon transport in
+       tissue," Med. Phys., vol. 20, no. 2, pp. 299-309, 1993.
+.. [2] M. Schweiger, S. R. Arridge, M. Hiraoka, and D. T. Delpy,
+       "The finite element method for the propagation of light in
+       scattering media," Med. Phys., vol. 20, pp. 1203-1210, 1993.
 
 Functions:
     assemble_stiffness: Diffusion stiffness matrix K

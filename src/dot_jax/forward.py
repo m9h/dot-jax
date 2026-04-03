@@ -1,8 +1,19 @@
 """Differentiable FEM forward model for diffuse optical tomography.
 
 JAX-native CW forward solver using Lineax for the linear system.
-Source/detector placement uses barycentric interpolation. The full
-forward_cw pipeline is differentiable w.r.t. optical properties.
+Source/detector placement uses barycentric interpolation. Detector
+values are extracted via the adjoint method (rhs_det^T @ phi_src),
+which is equivalent to the reciprocity principle in photon transport.
+
+The full ``forward_cw`` pipeline is differentiable w.r.t. optical
+properties (mua, musp), enabling autodiff Jacobians for reconstruction.
+
+References
+----------
+.. [1] S. R. Arridge, "Optical tomography in medical imaging,"
+       Inverse Problems, vol. 15, no. 2, pp. R41-R93, 1999.
+.. [2] P. Kidger, "On neural differential equations," DPhil thesis,
+       University of Oxford, 2021. (Lineax/Equinox framework)
 
 Functions:
     locate_sources: Find containing elements and barycentric coords
@@ -146,12 +157,12 @@ def forward_cw(mesh, mua, musp, srcpos, detpos, n_in=1.37, n_out=1.0):
     rhs_det = assemble_rhs(mesh, detpos)
 
     # Solve via Lineax (one column per source)
+    import jax
     operator = lx.MatrixLinearOperator(A)
 
     def solve_col(b):
         return lx.linear_solve(operator, b, solver=lx.LU()).value
 
-    import jax
     phi = jax.vmap(solve_col, in_axes=1, out_axes=1)(rhs_src)
 
     # Extract detector values

@@ -3,6 +3,23 @@
 JAX-native implementations of the analytical solutions from redbirdpy.
 All functions are JIT-compatible and differentiable via jax.grad.
 
+The CW fluence solutions implement the photon diffusion equation in
+homogeneous media. The semi-infinite geometry uses the extrapolated
+boundary condition with image sources following Haskell et al. (1994)
+and Farrell et al. (1992).
+
+References
+----------
+.. [1] R. C. Haskell et al., "Boundary conditions for the diffusion
+       equation in radiative transfer," JOSA A, vol. 11, no. 10,
+       pp. 2727-2741, 1994.
+.. [2] T. J. Farrell, M. S. Patterson, and B. C. Wilson, "A diffusion
+       theory model of spatially resolved, steady-state diffuse
+       reflectance for the noninvasive determination of tissue optical
+       properties in vivo," Med. Phys., vol. 19, pp. 879-888, 1992.
+.. [3] A. Ishimaru, "Wave Propagation and Scattering in Random Media,"
+       Academic Press, 1978.
+
 Functions:
     getreff: Effective reflection coefficient (Haskell 1994)
     getdistance: Source-detector distance matrix

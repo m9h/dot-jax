@@ -3,6 +3,24 @@
 JAX-native spectral forward model running CW forward solves across
 wavelengths. Supports autodiff Jacobians for reconstruction.
 
+The absorption Jacobian uses the adjoint (Frechet derivative) formula:
+    J[d,s,n] = -phi_src[n,s] * phi_det[n,d] * V_n
+where phi_src and phi_det are the forward and adjoint Green's functions.
+This is the standard sensitivity kernel for DOT (Arridge, 1999).
+
+Multi-wavelength operation enables spectral decomposition of
+chromophore concentrations via the modified Beer-Lambert law,
+following the approach of Corlu et al. (2003) and Dehghani et al. (2009).
+
+References
+----------
+.. [1] A. Corlu et al., "Three-dimensional in vivo fluorescence
+       diffuse optical tomography of breast cancer in humans,"
+       Opt. Express, vol. 15, pp. 6696-6716, 2007.
+.. [2] H. Dehghani et al., "Near infrared optical tomography using
+       NIRFAST," Int. J. Numer. Methods Biomed. Eng., vol. 25,
+       pp. 711-732, 2009.
+
 Functions:
     spectral_forward_cw: Forward solve at multiple wavelengths
     compute_jacobian_mua: Sensitivity matrix d(detval)/d(mua_node)

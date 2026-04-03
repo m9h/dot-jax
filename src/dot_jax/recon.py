@@ -1,7 +1,18 @@
-"""Gauss-Newton reconstruction via Optimistix.
+"""Gauss-Newton image reconstruction.
 
 Linearised image reconstruction for nodal absorption coefficient
-using the Born/Rytov approximation with Tikhonov regularisation.
+using the Born approximation with Tikhonov regularisation.
+
+The adjoint Jacobian follows Arridge (1999) and the Levenberg-Marquardt
+regularisation follows the standard formulation in Dehghani et al. (2009).
+
+References
+----------
+.. [1] S. R. Arridge, "Optical tomography in medical imaging,"
+       Inverse Problems, vol. 15, no. 2, pp. R41-R93, 1999.
+.. [2] H. Dehghani et al., "Near infrared optical tomography using
+       NIRFAST," Int. J. Numer. Methods Biomed. Eng., vol. 25,
+       pp. 711-732, 2009.
 
 Functions:
     reconstruct_mua: Linearised mua reconstruction from perturbation data
