@@ -17,6 +17,7 @@ from dot_jax.forward import (
     assemble_rhs,
     get_detector_values,
     forward_cw,
+    forward_cw_sparse,
 )
 
 
@@ -216,3 +217,83 @@ class TestForwardCW:
 
         g = jax.grad(detval_sum)(1.0)
         assert jnp.isfinite(g)
+
+
+# ---------------------------------------------------------------------------
+# Sparse CG forward solve
+# ---------------------------------------------------------------------------
+
+class TestForwardCWSparse:
+    def test_cross_validate_dense(self, box_mesh):
+        """Sparse CG and dense LU should give same results."""
+        srcpos = jnp.array([[5.0, 5.0, 5.0]])
+        detpos = jnp.array([[15.0, 15.0, 15.0]])
+        r_dense = forward_cw(box_mesh, 0.01, 1.0, srcpos, detpos)
+        r_sparse = forward_cw_sparse(box_mesh, 0.01, 1.0, srcpos, detpos)
+        npt.assert_allclose(r_sparse.detval, r_dense.detval, rtol=1e-5)
+        npt.assert_allclose(r_sparse.phi, r_dense.phi, rtol=1e-5)
+
+    def test_returns_forward_result(self, box_mesh):
+        srcpos = jnp.array([[5.0, 5.0, 5.0]])
+        detpos = jnp.array([[15.0, 15.0, 15.0]])
+        result = forward_cw_sparse(box_mesh, 0.01, 1.0, srcpos, detpos)
+        from dot_jax import ForwardResult
+        assert isinstance(result, ForwardResult)
+
+    def test_positive_detval(self, box_mesh):
+        srcpos = jnp.array([[5.0, 5.0, 5.0]])
+        detpos = jnp.array([[15.0, 15.0, 15.0]])
+        result = forward_cw_sparse(box_mesh, 0.01, 1.0, srcpos, detpos)
+        assert jnp.all(result.detval > 0)
+
+    def test_multi_source_detector(self, box_mesh):
+        srcpos = jnp.array([[3.0, 3.0, 3.0], [17.0, 17.0, 17.0]])
+        detpos = jnp.array([[10.0, 10.0, 10.0], [15.0, 5.0, 5.0]])
+        result = forward_cw_sparse(box_mesh, 0.01, 1.0, srcpos, detpos)
+        assert result.detval.shape == (2, 2)
+        assert result.phi.shape == (box_mesh.nn, 2)
+
+    def test_more_absorption_less_signal(self, box_mesh):
+        srcpos = jnp.array([[5.0, 5.0, 5.0]])
+        detpos = jnp.array([[15.0, 15.0, 15.0]])
+        r1 = forward_cw_sparse(box_mesh, 0.01, 1.0, srcpos, detpos)
+        r2 = forward_cw_sparse(box_mesh, 0.05, 1.0, srcpos, detpos)
+        assert r2.detval[0, 0] < r1.detval[0, 0]
+
+    def test_grad_wrt_mua(self, box_mesh):
+        srcpos = jnp.array([[5.0, 5.0, 5.0]])
+        detpos = jnp.array([[15.0, 15.0, 15.0]])
+
+        def detval_sum(mua):
+            r = forward_cw_sparse(box_mesh, mua, 1.0, srcpos, detpos)
+            return jnp.sum(r.detval)
+
+        g = jax.grad(detval_sum)(0.01)
+        assert jnp.isfinite(g)
+        assert g < 0
+
+    def test_grad_wrt_musp(self, box_mesh):
+        srcpos = jnp.array([[5.0, 5.0, 5.0]])
+        detpos = jnp.array([[15.0, 15.0, 15.0]])
+
+        def detval_sum(musp):
+            r = forward_cw_sparse(box_mesh, 0.01, musp, srcpos, detpos)
+            return jnp.sum(r.detval)
+
+        g = jax.grad(detval_sum)(1.0)
+        assert jnp.isfinite(g)
+
+    def test_grad_matches_dense(self, box_mesh):
+        """Sparse CG grad should match dense LU grad."""
+        srcpos = jnp.array([[5.0, 5.0, 5.0]])
+        detpos = jnp.array([[15.0, 15.0, 15.0]])
+
+        def f_dense(mua):
+            return jnp.sum(forward_cw(box_mesh, mua, 1.0, srcpos, detpos).detval)
+
+        def f_sparse(mua):
+            return jnp.sum(forward_cw_sparse(box_mesh, mua, 1.0, srcpos, detpos).detval)
+
+        g_dense = jax.grad(f_dense)(0.01)
+        g_sparse = jax.grad(f_sparse)(0.01)
+        npt.assert_allclose(g_sparse, g_dense, rtol=1e-3)
