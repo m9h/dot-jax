@@ -10,7 +10,12 @@ import pytest
 
 from dot_jax.mesh import FEMMesh
 from dot_jax.forward import forward_cw
-from dot_jax.recon import reconstruct_mua
+from dot_jax.recon import (
+    reconstruct_mua,
+    compute_lcurve,
+    select_lambda_lcurve,
+    select_lambda_gcv,
+)
 
 
 @pytest.fixture
@@ -130,3 +135,78 @@ class TestReconstructMua:
         )
         assert result.residuals.shape[0] == 4  # 3 steps + final
         assert jnp.all(jnp.isfinite(result.mua))
+
+
+# ---------------------------------------------------------------------------
+# Regularization parameter selection
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def lcurve_setup():
+    """Simple overdetermined system for L-curve testing."""
+    key = jax.random.PRNGKey(42)
+    J = jax.random.normal(key, (20, 8))
+    x_true = jnp.ones(8) * 0.01
+    data = J @ x_true
+    lambdas = jnp.logspace(-6, 2, 30)
+    return {"J": J, "data": data, "lambdas": lambdas, "x_true": x_true}
+
+
+class TestComputeLcurve:
+    def test_shape(self, lcurve_setup):
+        res_norms, sol_norms = compute_lcurve(
+            lcurve_setup["J"], lcurve_setup["data"], lcurve_setup["lambdas"],
+        )
+        assert res_norms.shape == (30,)
+        assert sol_norms.shape == (30,)
+
+    def test_residual_decreases_with_lambda(self, lcurve_setup):
+        """Less regularization → smaller residual."""
+        res_norms, _ = compute_lcurve(
+            lcurve_setup["J"], lcurve_setup["data"], lcurve_setup["lambdas"],
+        )
+        # lambdas are sorted ascending, residual should generally decrease
+        assert res_norms[-1] > res_norms[0]
+
+    def test_solution_increases_with_less_reg(self, lcurve_setup):
+        """Less regularization → larger solution norm."""
+        _, sol_norms = compute_lcurve(
+            lcurve_setup["J"], lcurve_setup["data"], lcurve_setup["lambdas"],
+        )
+        assert sol_norms[0] > sol_norms[-1]
+
+    def test_positive(self, lcurve_setup):
+        res_norms, sol_norms = compute_lcurve(
+            lcurve_setup["J"], lcurve_setup["data"], lcurve_setup["lambdas"],
+        )
+        assert jnp.all(res_norms >= 0)
+        assert jnp.all(sol_norms >= 0)
+
+
+class TestSelectLambdaLcurve:
+    def test_positive_finite(self, lcurve_setup):
+        lam = select_lambda_lcurve(
+            lcurve_setup["J"], lcurve_setup["data"], lcurve_setup["lambdas"],
+        )
+        assert jnp.isfinite(lam)
+        assert lam > 0
+
+    def test_auto_lambdas(self, lcurve_setup):
+        """Should work without explicit lambda range."""
+        lam = select_lambda_lcurve(lcurve_setup["J"], lcurve_setup["data"])
+        assert jnp.isfinite(lam)
+        assert lam > 0
+
+
+class TestSelectLambdaGCV:
+    def test_positive_finite(self, lcurve_setup):
+        lam = select_lambda_gcv(
+            lcurve_setup["J"], lcurve_setup["data"], lcurve_setup["lambdas"],
+        )
+        assert jnp.isfinite(lam)
+        assert lam > 0
+
+    def test_auto_lambdas(self, lcurve_setup):
+        lam = select_lambda_gcv(lcurve_setup["J"], lcurve_setup["data"])
+        assert jnp.isfinite(lam)
+        assert lam > 0

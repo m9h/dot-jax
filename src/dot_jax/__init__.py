@@ -13,4 +13,12 @@ from .forward import forward_cw, forward_cw_sparse, locate_sources, assemble_rhs
 from .spectral import spectral_forward_cw, compute_jacobian_mua
 from .recon import reconstruct_mua
 from .io import read_snirf, load_bids_nirs, snirf_to_dot_jax, SnirfData, BidsNirsRun
-from .hemodynamics import intensity_to_od, bandpass_filter, downsample, spectral_unmix
+from .hemodynamics import (
+    intensity_to_od, bandpass_filter, downsample, spectral_unmix,
+    compute_channel_snr, prune_channels,
+    detect_motion_artifacts, correct_motion_spline,
+    normalize_od, zscore_images, compute_gvtd,
+    identify_short_channels, regress_short_channels,
+)
+from .mesh import smooth_on_mesh
+from .recon import compute_lcurve, select_lambda_lcurve, select_lambda_gcv

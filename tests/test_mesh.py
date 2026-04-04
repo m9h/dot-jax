@@ -18,6 +18,7 @@ from dot_jax.mesh import (
     elem2node,
     extract_surface,
     reorient_elems,
+    smooth_on_mesh,
 )
 
 
@@ -372,3 +373,41 @@ class TestFEMMesh:
         )
         leaves = jax.tree.leaves(mesh)
         assert len(leaves) == 7  # node, elem, face, evol, area, nvol, deldotdel
+
+
+# ---------------------------------------------------------------------------
+# Spatial smoothing
+# ---------------------------------------------------------------------------
+
+class TestSmoothOnMesh:
+    def test_shape_1d(self, tiny_mesh):
+        mesh = FEMMesh.create(**tiny_mesh)
+        values = jnp.ones(mesh.nn)
+        smoothed = smooth_on_mesh(mesh, values, fwhm=5.0)
+        assert smoothed.shape == (mesh.nn,)
+
+    def test_shape_2d(self, tiny_mesh):
+        mesh = FEMMesh.create(**tiny_mesh)
+        values = jnp.ones((10, mesh.nn))
+        smoothed = smooth_on_mesh(mesh, values, fwhm=5.0)
+        assert smoothed.shape == (10, mesh.nn)
+
+    def test_constant_unchanged(self, tiny_mesh):
+        """Smoothing a constant field should not change it."""
+        mesh = FEMMesh.create(**tiny_mesh)
+        values = jnp.ones(mesh.nn) * 7.0
+        smoothed = smooth_on_mesh(mesh, values, fwhm=5.0)
+        npt.assert_allclose(smoothed, 7.0, atol=1e-10)
+
+    def test_reduces_variance(self, tiny_mesh):
+        """Smoothing should reduce spatial variance."""
+        mesh = FEMMesh.create(**tiny_mesh)
+        values = jax.random.normal(jax.random.PRNGKey(0), (mesh.nn,))
+        smoothed = smooth_on_mesh(mesh, values, fwhm=5.0)
+        assert jnp.std(smoothed) < jnp.std(values)
+
+    def test_finite(self, tiny_mesh):
+        mesh = FEMMesh.create(**tiny_mesh)
+        values = jax.random.normal(jax.random.PRNGKey(0), (mesh.nn,))
+        smoothed = smooth_on_mesh(mesh, values, fwhm=10.0)
+        assert jnp.all(jnp.isfinite(smoothed))

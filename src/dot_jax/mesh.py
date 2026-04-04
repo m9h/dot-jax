@@ -308,3 +308,43 @@ def extract_surface(elem):
 
     boundary_idx = indices[counts == 1]
     return faces[boundary_idx]
+
+
+def smooth_on_mesh(mesh, node_values, fwhm=13.0):
+    """Gaussian spatial smoothing on mesh nodes.
+
+    Builds a distance-weighted Gaussian kernel and applies it as a
+    weighted average. Kernel is truncated at 2*fwhm for efficiency.
+
+    Parameters
+    ----------
+    mesh : FEMMesh
+    node_values : (nn,) or (n_time, nn) — values at mesh nodes.
+    fwhm : float — full width at half maximum (mm).
+
+    Returns
+    -------
+    smoothed : same shape as node_values.
+    """
+    node = jnp.asarray(mesh.node)
+    nn = node.shape[0]
+    sigma = fwhm / 2.3548  # FWHM to sigma
+
+    # Pairwise distance matrix (nn, nn)
+    diff = node[:, None, :] - node[None, :, :]  # (nn, nn, 3)
+    dist2 = jnp.sum(diff ** 2, axis=2)           # (nn, nn)
+
+    # Gaussian kernel, truncated at 2*fwhm
+    cutoff2 = (2.0 * fwhm) ** 2
+    kernel = jnp.exp(-dist2 / (2.0 * sigma ** 2))
+    kernel = jnp.where(dist2 <= cutoff2, kernel, 0.0)
+
+    # Normalize rows
+    row_sums = jnp.sum(kernel, axis=1, keepdims=True)
+    kernel = kernel / jnp.maximum(row_sums, 1e-30)
+
+    # Apply
+    if node_values.ndim == 1:
+        return kernel @ node_values
+    else:
+        return (kernel @ node_values.T).T

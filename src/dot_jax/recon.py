@@ -16,6 +16,9 @@ References
 
 Functions:
     reconstruct_mua: Linearised mua reconstruction from perturbation data
+    compute_lcurve: L-curve for regularization parameter selection
+    select_lambda_lcurve: Optimal lambda at L-curve corner
+    select_lambda_gcv: Optimal lambda via Generalized Cross-Validation
 """
 
 import jax.numpy as jnp
@@ -94,3 +97,123 @@ def reconstruct_mua(mesh, data, srcpos, detpos, mua0, musp,
         musp=jnp.full(nn, musp),
         residuals=jnp.array(residuals),
     )
+
+
+# =============================================================================
+# Regularization parameter selection
+# =============================================================================
+
+
+def compute_lcurve(J, data, lambdas):
+    """Compute L-curve: residual norm vs solution norm for each lambda.
+
+    Parameters
+    ----------
+    J : (n_meas, n_nodes) — Jacobian matrix.
+    data : (n_meas,) — measurement vector.
+    lambdas : (n_lambda,) — regularization parameters.
+
+    Returns
+    -------
+    residual_norms : (n_lambda,) — ||J x - d||_2 for each lambda.
+    solution_norms : (n_lambda,) — ||x||_2 for each lambda.
+    """
+    JtJ = J.T @ J
+    Jtd = J.T @ data
+    nn = J.shape[1]
+
+    res_norms = []
+    sol_norms = []
+    for lam in lambdas:
+        x = jnp.linalg.solve(JtJ + float(lam) * jnp.eye(nn), Jtd)
+        res_norms.append(jnp.linalg.norm(J @ x - data))
+        sol_norms.append(jnp.linalg.norm(x))
+
+    return jnp.array(res_norms), jnp.array(sol_norms)
+
+
+def _default_lambdas(J, n=50):
+    """Generate default lambda range from singular values of J."""
+    s = jnp.linalg.svd(J, compute_uv=False)
+    s_pos = s[s > 1e-15]
+    if len(s_pos) < 2:
+        return jnp.logspace(-6, 2, n)
+    smin, smax = float(s_pos[-1]), float(s_pos[0])
+    return jnp.logspace(jnp.log10(smin ** 2), jnp.log10(smax ** 2), n)
+
+
+def select_lambda_lcurve(J, data, lambdas=None):
+    """Select optimal regularization parameter at L-curve corner.
+
+    Finds the point of maximum curvature on the log-log L-curve.
+
+    Parameters
+    ----------
+    J : (n_meas, n_nodes) — Jacobian.
+    data : (n_meas,) — measurements.
+    lambdas : (n_lambda,) optional — candidate values.
+
+    Returns
+    -------
+    lambda_opt : float — optimal regularization parameter.
+    """
+    if lambdas is None:
+        lambdas = _default_lambdas(J)
+
+    res_norms, sol_norms = compute_lcurve(J, data, lambdas)
+
+    # Maximum curvature on log-log L-curve
+    x = jnp.log(res_norms + 1e-30)
+    y = jnp.log(sol_norms + 1e-30)
+
+    # Discrete curvature via second differences
+    dx = jnp.diff(x)
+    dy = jnp.diff(y)
+    d2x = jnp.diff(dx)
+    d2y = jnp.diff(dy)
+
+    # Curvature = |x'y'' - y'x''| / (x'^2 + y'^2)^(3/2)
+    xp = (dx[:-1] + dx[1:]) / 2
+    yp = (dy[:-1] + dy[1:]) / 2
+    kappa = jnp.abs(xp * d2y - yp * d2x) / (xp ** 2 + yp ** 2) ** 1.5
+
+    corner_idx = jnp.argmax(kappa) + 1  # +1 for the diff offset
+    return float(lambdas[corner_idx])
+
+
+def select_lambda_gcv(J, data, lambdas=None):
+    """Select optimal regularization parameter via GCV.
+
+    GCV(lambda) = ||Jx - d||^2 / trace(I - H)^2
+    where H = J (J^T J + lambda I)^{-1} J^T.
+
+    Parameters
+    ----------
+    J : (n_meas, n_nodes) — Jacobian.
+    data : (n_meas,) — measurements.
+    lambdas : (n_lambda,) optional — candidate values.
+
+    Returns
+    -------
+    lambda_opt : float — optimal regularization parameter.
+    """
+    if lambdas is None:
+        lambdas = _default_lambdas(J)
+
+    m = J.shape[0]
+    nn = J.shape[1]
+    JtJ = J.T @ J
+    Jtd = J.T @ data
+
+    gcv_vals = []
+    for lam in lambdas:
+        A_inv = jnp.linalg.solve(JtJ + float(lam) * jnp.eye(nn), jnp.eye(nn))
+        H = J @ A_inv @ J.T
+        x = A_inv @ Jtd
+        residual = J @ x - data
+        denom = (jnp.trace(jnp.eye(m) - H) / m) ** 2
+        gcv = jnp.sum(residual ** 2) / m / jnp.maximum(denom, 1e-30)
+        gcv_vals.append(gcv)
+
+    gcv_vals = jnp.array(gcv_vals)
+    return float(lambdas[jnp.argmin(gcv_vals)])
