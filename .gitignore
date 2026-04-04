@@ -7,3 +7,6 @@ build/
 *.so
 .venv/
 docs/_build/
+**/.DS_Store
+paper/cache/
+paper/*.tex

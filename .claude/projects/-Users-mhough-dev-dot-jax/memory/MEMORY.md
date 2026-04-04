@@ -1,0 +1,2 @@
+- [Use uv](feedback_uv.md) — prefer uv over pip for all Python package management
+- [Red-green TDD](feedback_red_green.md) — write failing tests first, then implement
