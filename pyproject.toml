@@ -49,6 +49,7 @@ dependencies = [
 mesh = ["iso2mesh>=0.5.0"]
 test = ["pytest>=7.0", "scipy>=1.10", "redbirdpy>=0.2.0"]
 dev = ["pytest>=7.0", "scipy>=1.10", "redbirdpy>=0.2.0", "pytest-cov>=4.0"]
+docs = ["sphinx>=7.0", "sphinx-rtd-theme>=2.0", "numpydoc>=1.6", "myst-parser>=2.0", "sphinx-autodoc-typehints>=1.25"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/dot_jax"]

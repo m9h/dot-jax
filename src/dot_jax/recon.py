@@ -31,7 +31,8 @@ def reconstruct_mua(mesh, data, srcpos, detpos, mua0, musp,
     """Linearised reconstruction of nodal absorption coefficient.
 
     Single-step (Born approximation) or iterative Gauss-Newton
-    reconstruction. At each step:
+    reconstruction. At each step::
+
         delta_mua = (J^T J + lambda * diag(J^T J))^{-1} J^T (data - pred)
 
     Parameters
