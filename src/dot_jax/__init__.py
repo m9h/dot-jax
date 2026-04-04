@@ -13,3 +13,4 @@ from .forward import forward_cw, forward_cw_sparse, locate_sources, assemble_rhs
 from .spectral import spectral_forward_cw, compute_jacobian_mua
 from .recon import reconstruct_mua
 from .io import read_snirf, load_bids_nirs, snirf_to_dot_jax, SnirfData, BidsNirsRun
+from .hemodynamics import intensity_to_od, bandpass_filter, downsample, spectral_unmix
