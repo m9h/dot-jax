@@ -4,6 +4,7 @@ Validates the atlas-based pipeline for DOT forward modelling using the
 MNI152 atlas and ds004569 optode geometry.
 """
 
+import os
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -81,7 +82,9 @@ class TestGenerateHeadMesh:
 # Optode-to-surface projection
 # ---------------------------------------------------------------------------
 
-DS004569 = Path("/data/raw/ds004569")
+DS004569 = Path(
+    os.environ.get("DOT_JAX_DATA", Path.home() / "data/raw")
+) / "ds004569"
 SNIRF_FILE = DS004569 / "sub-01/ses-01/nirs/sub-01_ses-01_task-movie.snirf"
 has_ds004569 = SNIRF_FILE.exists() and SNIRF_FILE.stat().st_size > 1000
 

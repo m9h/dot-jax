@@ -4,6 +4,7 @@ Tests against the ds004569 high-density DOT dataset from OpenNeuro.
 Skipped if data is not available locally.
 """
 
+import os
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -20,7 +21,9 @@ from dot_jax.io import (
 )
 
 
-DS004569 = Path("/data/raw/ds004569")
+DS004569 = Path(
+    os.environ.get("DOT_JAX_DATA", Path.home() / "data/raw")
+) / "ds004569"
 SNIRF_FILE = DS004569 / "sub-01/ses-01/nirs/sub-01_ses-01_task-movie.snirf"
 NIRS_DIR = DS004569 / "sub-01/ses-01/nirs"
 
