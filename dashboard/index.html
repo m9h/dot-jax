@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>dot-jax Real-Time fNIRS Dashboard</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: #0a0a1a; color: #e0e0e0; }
+  .header { background: #1a1a2e; padding: 16px 24px; display: flex;
+            align-items: center; justify-content: space-between; }
+  .header h1 { font-size: 20px; font-weight: 600; }
+  .header .status { font-size: 14px; }
+  .status .dot { display: inline-block; width: 10px; height: 10px;
+                 border-radius: 50%; margin-right: 6px; }
+  .dot.connected { background: #4caf50; }
+  .dot.disconnected { background: #f44336; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+          padding: 16px; max-width: 1400px; margin: 0 auto; }
+  .card { background: #16213e; border-radius: 8px; padding: 16px; }
+  .card h2 { font-size: 14px; color: #888; margin-bottom: 12px;
+             text-transform: uppercase; letter-spacing: 1px; }
+  .metric { font-size: 36px; font-weight: 700; }
+  .metric.positive { color: #ff6b6b; }
+  .metric.negative { color: #4ecdc4; }
+  .metric-label { font-size: 12px; color: #666; margin-top: 4px; }
+  .chart { width: 100%; height: 200px; position: relative; }
+  canvas { width: 100%; height: 100%; }
+  .quality-bar { height: 8px; background: #2a2a4a; border-radius: 4px;
+                 overflow: hidden; margin-top: 8px; }
+  .quality-bar .fill { height: 100%; border-radius: 4px;
+                       transition: width 0.3s; }
+  .quality-bar .fill.good { background: #4caf50; }
+  .quality-bar .fill.warning { background: #ff9800; }
+  .quality-bar .fill.bad { background: #f44336; }
+  .stats-row { display: flex; gap: 24px; margin-top: 12px; }
+  .stat { text-align: center; }
+  .stat-value { font-size: 24px; font-weight: 600; }
+  .stat-label { font-size: 11px; color: #666; }
+  .full-width { grid-column: 1 / -1; }
+  #epoch-container { display: none; }
+  #epoch-container.active { display: block; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>dot-jax Real-Time fNIRS</h1>
+  <div class="status">
+    <span class="dot disconnected" id="status-dot"></span>
+    <span id="status-text">Disconnected</span>
+    <span id="frame-counter" style="margin-left: 16px; color: #666;">Frame: 0</span>
+  </div>
+</div>
+
+<div class="grid">
+  <!-- HbO time series -->
+  <div class="card">
+    <h2>HbO (global mean)</h2>
+    <div class="chart">
+      <canvas id="hbo-chart"></canvas>
+    </div>
+  </div>
+
+  <!-- HbR time series -->
+  <div class="card">
+    <h2>HbR (global mean)</h2>
+    <div class="chart">
+      <canvas id="hbr-chart"></canvas>
+    </div>
+  </div>
+
+  <!-- Quality metrics -->
+  <div class="card">
+    <h2>Signal Quality (GVTD)</h2>
+    <div class="metric" id="gvtd-value">0.000</div>
+    <div class="quality-bar">
+      <div class="fill good" id="gvtd-bar" style="width: 100%"></div>
+    </div>
+    <div class="stats-row">
+      <div class="stat">
+        <div class="stat-value" id="fps-value">0.0</div>
+        <div class="stat-label">Hz</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="hbo-max-value">0.00</div>
+        <div class="stat-label">|HbO| max</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Spatial map (simplified bar chart of node values) -->
+  <div class="card">
+    <h2>HbO Spatial Map (top 20 nodes)</h2>
+    <div class="chart">
+      <canvas id="spatial-chart"></canvas>
+    </div>
+  </div>
+
+  <!-- Epoch average -->
+  <div class="card full-width" id="epoch-container">
+    <h2>Event-Locked HbO Average</h2>
+    <div class="chart" style="height: 250px;">
+      <canvas id="epoch-chart"></canvas>
+    </div>
+    <div class="stats-row">
+      <div class="stat">
+        <div class="stat-value" id="epoch-count">0</div>
+        <div class="stat-label">Epochs</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const WS_URL = `ws://${window.location.hostname || 'localhost'}:18080`;
+const MAX_HISTORY = 300;
+
+// State
+let hboHistory = [];
+let hbrHistory = [];
+let connected = false;
+let lastFrameTime = Date.now();
+let frameCount = 0;
+
+// Canvas contexts
+const hboCtx = document.getElementById('hbo-chart').getContext('2d');
+const hbrCtx = document.getElementById('hbr-chart').getContext('2d');
+const spatialCtx = document.getElementById('spatial-chart').getContext('2d');
+const epochCtx = document.getElementById('epoch-chart').getContext('2d');
+
+function drawTimeSeries(ctx, data, color, label) {
+  const canvas = ctx.canvas;
+  canvas.width = canvas.offsetWidth * 2;
+  canvas.height = canvas.offsetHeight * 2;
+  const w = canvas.width, h = canvas.height;
+
+  ctx.clearRect(0, 0, w, h);
+
+  if (data.length < 2) return;
+
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const range = max - min || 1;
+
+  // Grid
+  ctx.strokeStyle = '#2a2a4a';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, h/2); ctx.lineTo(w, h/2);
+  ctx.stroke();
+
+  // Data line
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let i = 0; i < data.length; i++) {
+    const x = (i / (MAX_HISTORY - 1)) * w;
+    const y = h - ((data[i] - min) / range) * (h - 20) - 10;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // Labels
+  ctx.fillStyle = '#666';
+  ctx.font = '20px sans-serif';
+  ctx.fillText(`${max.toFixed(4)}`, 4, 18);
+  ctx.fillText(`${min.toFixed(4)}`, 4, h - 4);
+}
+
+function drawSpatialBar(ctx, hbo) {
+  const canvas = ctx.canvas;
+  canvas.width = canvas.offsetWidth * 2;
+  canvas.height = canvas.offsetHeight * 2;
+  const w = canvas.width, h = canvas.height;
+
+  ctx.clearRect(0, 0, w, h);
+
+  // Show top 20 nodes by absolute value
+  const indexed = hbo.map((v, i) => ({v, i}));
+  indexed.sort((a, b) => Math.abs(b.v) - Math.abs(a.v));
+  const top = indexed.slice(0, 20);
+  const maxAbs = Math.max(...top.map(d => Math.abs(d.v))) || 1;
+
+  const barW = (w - 40) / top.length;
+  const midY = h / 2;
+
+  top.forEach((d, i) => {
+    const x = 20 + i * barW;
+    const barH = (d.v / maxAbs) * (h / 2 - 20);
+    ctx.fillStyle = d.v >= 0 ? '#ff6b6b' : '#4ecdc4';
+    ctx.fillRect(x + 2, midY - Math.max(barH, 0), barW - 4, Math.abs(barH));
+  });
+
+  ctx.strokeStyle = '#444';
+  ctx.beginPath();
+  ctx.moveTo(20, midY); ctx.lineTo(w - 20, midY);
+  ctx.stroke();
+}
+
+function drawEpochAvg(ctx, epochData) {
+  const canvas = ctx.canvas;
+  canvas.width = canvas.offsetWidth * 2;
+  canvas.height = canvas.offsetHeight * 2;
+  const w = canvas.width, h = canvas.height;
+
+  ctx.clearRect(0, 0, w, h);
+
+  if (!epochData || epochData.length === 0) return;
+
+  // Average across nodes for global HRF
+  const nT = epochData.length;
+  const globalAvg = epochData.map(row =>
+    row.reduce((s, v) => s + v, 0) / row.length
+  );
+
+  const min = Math.min(...globalAvg);
+  const max = Math.max(...globalAvg);
+  const range = max - min || 1;
+
+  ctx.strokeStyle = '#ff6b6b';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  for (let i = 0; i < nT; i++) {
+    const x = (i / (nT - 1)) * (w - 40) + 20;
+    const y = h - 20 - ((globalAvg[i] - min) / range) * (h - 40);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // Event onset line
+  ctx.strokeStyle = '#ffffff44';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([5, 5]);
+  ctx.beginPath();
+  ctx.moveTo(20, 0); ctx.lineTo(20, h);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.fillStyle = '#888';
+  ctx.font = '20px sans-serif';
+  ctx.fillText('Event-locked HRF (global mean)', 30, 24);
+}
+
+// WebSocket
+function connect() {
+  const ws = new WebSocket(WS_URL);
+
+  ws.onopen = () => {
+    connected = true;
+    document.getElementById('status-dot').className = 'dot connected';
+    document.getElementById('status-text').textContent = 'Connected';
+  };
+
+  ws.onclose = () => {
+    connected = false;
+    document.getElementById('status-dot').className = 'dot disconnected';
+    document.getElementById('status-text').textContent = 'Disconnected';
+    setTimeout(connect, 2000);
+  };
+
+  ws.onmessage = (event) => {
+    const state = JSON.parse(event.data);
+    frameCount = state.frame_count;
+
+    // Update history
+    hboHistory.push(state.hbo_mean);
+    hbrHistory.push(state.hbr_mean);
+    if (hboHistory.length > MAX_HISTORY) hboHistory.shift();
+    if (hbrHistory.length > MAX_HISTORY) hbrHistory.shift();
+
+    // Update displays
+    document.getElementById('frame-counter').textContent = `Frame: ${frameCount}`;
+    document.getElementById('gvtd-value').textContent = state.gvtd.toFixed(6);
+    document.getElementById('hbo-max-value').textContent = state.hbo_max.toFixed(4);
+
+    const now = Date.now();
+    const fps = 1000 / (now - lastFrameTime);
+    lastFrameTime = now;
+    document.getElementById('fps-value').textContent = fps.toFixed(1);
+
+    // GVTD quality bar
+    const gvtdNorm = Math.min(state.gvtd / 0.1, 1);
+    const bar = document.getElementById('gvtd-bar');
+    bar.style.width = `${(1 - gvtdNorm) * 100}%`;
+    bar.className = `fill ${gvtdNorm < 0.3 ? 'good' : gvtdNorm < 0.7 ? 'warning' : 'bad'}`;
+
+    // Draw charts
+    drawTimeSeries(hboCtx, hboHistory, '#ff6b6b', 'HbO');
+    drawTimeSeries(hbrCtx, hbrHistory, '#4ecdc4', 'HbR');
+    drawSpatialBar(spatialCtx, state.hbo);
+
+    // Epoch average
+    if (state.epoch_avg) {
+      document.getElementById('epoch-container').className = 'card full-width active';
+      drawEpochAvg(epochCtx, state.epoch_avg);
+    }
+  };
+}
+
+connect();
+</script>
+</body>
+</html>
