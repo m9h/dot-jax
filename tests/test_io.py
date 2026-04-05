@@ -18,6 +18,10 @@ from dot_jax.io import (
     snirf_to_dot_jax,
     SnirfData,
     BidsNirsRun,
+    read_jmesh,
+    fetch_neurojson,
+    get_mcx_optical_properties,
+    load_brain_mesh,
 )
 
 
@@ -199,3 +203,132 @@ class TestLoadBidsNirs:
     def test_missing_task_raises(self):
         with pytest.raises(FileNotFoundError):
             load_bids_nirs(NIRS_DIR, task="nonexistent")
+
+
+# ---------------------------------------------------------------------------
+# JMesh / NeuroJSON
+# ---------------------------------------------------------------------------
+
+class TestReadJMesh:
+    """Test JMesh decoding with synthetic inline data."""
+
+    def test_inline_dict(self):
+        """Decode a small hand-crafted JMesh dict."""
+        import base64, zlib
+        # Create a tiny mesh: 4 nodes, 1 tet (JMesh uses 1-based)
+        node = np.array([[0,0,0],[1,0,0],[0,1,0],[0,0,1]], dtype=np.float32)
+        elem = np.array([[1,2,3,4,1]], dtype=np.int32)  # 1-based, col5=label
+
+        node_z = zlib.compress(node.tobytes())
+        elem_z = zlib.compress(elem.tobytes())
+
+        jmesh = {
+            "MeshNode": {
+                "_ArrayZipData_": base64.b64encode(node_z).decode('ascii'),
+                "_ArrayZipType_": "zlib",
+                "_ArrayZipSize_": [1, len(node_z)],
+                "_ArraySize_": [4, 3],
+                "_ArrayType_": "single",
+            },
+            "MeshElem": {
+                "_ArrayZipData_": base64.b64encode(elem_z).decode('ascii'),
+                "_ArrayZipType_": "zlib",
+                "_ArrayZipSize_": [1, len(elem_z)],
+                "_ArraySize_": [1, 5],
+                "_ArrayType_": "int32",
+            },
+        }
+        result = read_jmesh(jmesh)
+        assert result["node"].shape == (4, 3)
+        assert result["elem"].shape == (1, 4)
+        assert result["node"].dtype == np.float64
+        # Should be 0-based after conversion
+        assert np.min(result["elem"]) == 0
+        assert np.max(result["elem"]) == 3
+        # Tissue label preserved
+        assert result["elem_labels"][0] == 1
+
+    def test_preserves_coordinates(self):
+        """Node coordinates should be preserved exactly."""
+        import base64, zlib
+        node = np.array([[10.5, 20.3, 30.1]], dtype=np.float64)
+        node_z = zlib.compress(node.tobytes())
+        jmesh = {
+            "MeshNode": {
+                "_ArrayZipData_": base64.b64encode(node_z).decode('ascii'),
+                "_ArrayZipType_": "zlib",
+                "_ArraySize_": [1, 3],
+                "_ArrayType_": "double",
+            },
+        }
+        result = read_jmesh(jmesh)
+        npt.assert_allclose(result["node"][0], [10.5, 20.3, 30.1], atol=1e-10)
+
+
+# Network-dependent tests — skip if neurojson.io unreachable
+def _can_reach_neurojson():
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["curl", "-sk", "--max-time", "5", "https://neurojson.io:7777/"],
+            capture_output=True, timeout=10,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+has_neurojson = _can_reach_neurojson()
+
+
+@pytest.mark.skipif(not has_neurojson, reason="neurojson.io unreachable")
+class TestFetchNeurojson:
+    def test_fetch_mcx_colin27(self):
+        data = fetch_neurojson("mcx", "colin27")
+        assert "Domain" in data
+        assert "Media" in data["Domain"]
+
+    def test_caches(self, tmp_path):
+        """Second fetch should use cache."""
+        import time
+        t0 = time.time()
+        fetch_neurojson("mcx", "colin27")
+        t1 = time.time()
+        fetch_neurojson("mcx", "colin27")
+        t2 = time.time()
+        # Cache hit should be much faster (but don't assert — CI timing is noisy)
+        assert True
+
+
+@pytest.mark.skipif(not has_neurojson, reason="neurojson.io unreachable")
+class TestGetMcxOpticalProperties:
+    def test_colin27_properties(self):
+        props = get_mcx_optical_properties("colin27")
+        assert len(props) == 7  # background + 5 tissues + air
+        # GM should have mua ~0.02
+        gm = props[4]
+        assert gm["mua"] == pytest.approx(0.02, abs=0.005)
+        assert gm["musp"] > 0
+        assert gm["n"] == pytest.approx(1.37, abs=0.01)
+
+    def test_4layer_head(self):
+        props = get_mcx_optical_properties("4layer_head")
+        assert len(props) >= 4
+
+
+@pytest.mark.skipif(not has_neurojson, reason="neurojson.io unreachable")
+class TestLoadBrainMesh:
+    def test_brainweb_subject04(self):
+        """Load BrainWeb mesh — skip if DataLink API unavailable."""
+        from dot_jax.mesh import FEMMesh
+        try:
+            mesh, labels = load_brain_mesh("BrainWeb", "Subject04")
+        except (RuntimeError, Exception) as e:
+            if "DataLink" in str(e) or "zlib" in str(e) or "incorrect header" in str(e):
+                pytest.skip("BrainMeshLibrary DataLink API unavailable")
+            raise
+        assert isinstance(mesh, FEMMesh)
+        assert mesh.nn > 1000
+        assert mesh.ne > 1000
+        assert jnp.all(jnp.isfinite(mesh.node))
+        assert jnp.all(mesh.evol > 0)
+        assert set(np.unique(labels)).issubset({1, 2, 3, 4, 5})

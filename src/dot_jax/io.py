@@ -1,17 +1,23 @@
-"""SNIRF and BIDS-fNIRS I/O for dot-jax.
+"""SNIRF, BIDS-fNIRS, and JMesh/NeuroJSON I/O for dot-jax.
 
-Reads SNIRF files (HDF5) and BIDS-fNIRS directory layouts into
-JAX-compatible arrays for the forward/inverse pipeline. Uses h5py
+Reads SNIRF files (HDF5), BIDS-fNIRS directory layouts, and
+JMesh (NeuroJSON) mesh files into JAX-compatible arrays. Uses h5py
 directly — no external SNIRF library required.
 
 SNIRF spec: https://github.com/fNIRS/snirf
 BIDS-fNIRS: https://bids-specification.readthedocs.io/en/stable/
              modality-specific-files/near-infrared-spectroscopy.html
+JMesh spec: https://github.com/NeuroJSON/jmesh
+NeuroJSON:  https://neurojson.io
 
 Functions:
     read_snirf: Read a .snirf file into a SnirfData container
     load_bids_nirs: Load a BIDS-fNIRS subject/session directory
     snirf_to_dot_jax: Extract arrays needed for forward_cw / reconstruct_mua
+    read_jmesh: Read a JMesh file (local or URL) into node/elem arrays
+    fetch_neurojson: Fetch a document from the NeuroJSON CouchDB API
+    get_mcx_optical_properties: Get tissue optical properties from MCX benchmarks
+    load_brain_mesh: Load a pre-built brain mesh from BrainMeshLibrary
 """
 
 import csv
@@ -400,3 +406,249 @@ def _read_events_tsv(path):
         events[i, 2] = type_map.get(r.get("trial_type", "unknown"), 0)
 
     return events
+
+
+# =============================================================================
+# JMesh / NeuroJSON I/O
+# =============================================================================
+
+_JMESH_DTYPE_MAP = {
+    "single": np.float32,
+    "double": np.float64,
+    "int32": np.int32,
+    "uint8": np.uint8,
+    "uint32": np.uint32,
+    "int64": np.int64,
+}
+
+
+def _resolve_jmesh_data(data_field):
+    """Resolve a JMesh data field: inline string, _DataLink_ URL, or raw bytes."""
+    import subprocess
+
+    if isinstance(data_field, str):
+        return data_field  # inline base64 string
+    elif isinstance(data_field, dict):
+        if "_DataLink_" in data_field:
+            url = data_field["_DataLink_"]
+            result = subprocess.run(
+                ["curl", "-skL", url],
+                capture_output=True, timeout=120,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"Failed to fetch {url}")
+            return result.stdout  # raw bytes
+        raise ValueError(f"Unknown JMesh data dict: {list(data_field.keys())}")
+    elif isinstance(data_field, bytes):
+        return data_field
+    raise TypeError(f"Cannot resolve JMesh data of type {type(data_field)}")
+
+
+def _decode_jmesh_array(data_field, info):
+    """Decode a JMesh compressed+encoded array.
+
+    JMesh arrays are base64-encoded, optionally zlib-compressed, with
+    metadata in a companion dict. Data may also be a _DataLink_ URL
+    to an external binary resource.
+    """
+    import base64
+    import zlib
+
+    resolved = _resolve_jmesh_data(data_field)
+
+    # If we got raw bytes from a _DataLink_, it's already binary
+    if isinstance(resolved, bytes):
+        raw = resolved
+    else:
+        raw = base64.b64decode(resolved)
+
+    zip_type = info.get("_ArrayZipType_", info.get("ArrayZipType", "")).lower()
+    if zip_type == "zlib":
+        raw = zlib.decompress(raw)
+
+    type_key = info.get("_ArrayType_", info.get("ArrayType", "single"))
+    dtype = _JMESH_DTYPE_MAP.get(type_key, np.float32)
+
+    shape = info.get("_ArraySize_", info.get("ArraySize", []))
+    if isinstance(shape, (int, float)):
+        shape = [int(shape)]
+    else:
+        shape = [int(s) for s in shape]
+
+    arr = np.frombuffer(raw, dtype=dtype)
+    if shape:
+        arr = arr.reshape(shape)
+    return arr
+
+
+def read_jmesh(source):
+    """Read a JMesh mesh file (local path or parsed dict).
+
+    Decodes MeshNode and MeshElem arrays from JMesh format.
+    JMesh stores arrays as base64+zlib compressed data with _DataInfo_
+    metadata describing dtype and shape.
+
+    Parameters
+    ----------
+    source : str, Path, or dict
+        Path to a .jmesh/.json file, or an already-parsed dict.
+
+    Returns
+    -------
+    result : dict
+        Keys: 'node' (N, 3) float64 — node coordinates,
+              'elem' (M, 4+) int32 — element connectivity (0-based),
+              'elem_labels' (M,) int32 — tissue labels (if column 5 exists).
+    """
+    if isinstance(source, dict):
+        data = source
+    else:
+        path = Path(source)
+        with open(path) as f:
+            data = json.load(f)
+
+    result = {}
+
+    # Decode MeshNode
+    if "MeshNode" in data:
+        nd = data["MeshNode"]
+        if isinstance(nd, dict) and "_ArrayZipData_" in nd:
+            node = _decode_jmesh_array(nd["_ArrayZipData_"], nd)
+        elif isinstance(nd, str):
+            info = data.get("MeshNode_DataInfo_", {})
+            node = _decode_jmesh_array(nd, info)
+        else:
+            node = np.array(nd, dtype=np.float64)
+        result["node"] = node.astype(np.float64)
+
+    # Decode MeshElem
+    if "MeshElem" in data:
+        ed = data["MeshElem"]
+        if isinstance(ed, dict) and "_ArrayZipData_" in ed:
+            elem = _decode_jmesh_array(ed["_ArrayZipData_"], ed)
+        elif isinstance(ed, str):
+            info = data.get("MeshElem_DataInfo_", {})
+            elem = _decode_jmesh_array(ed, info)
+        else:
+            elem = np.array(ed, dtype=np.int32)
+        elem = elem.astype(np.int32)
+
+        # JMesh uses 1-based indexing; convert to 0-based
+        # Column 5 (if present) is the tissue label, not a node index
+        if elem.shape[1] >= 5:
+            result["elem_labels"] = elem[:, 4].copy()
+            result["elem"] = elem[:, :4] - 1  # 0-based
+        else:
+            result["elem"] = elem - 1  # 0-based
+
+    return result
+
+
+def fetch_neurojson(database, document, cache=True):
+    """Fetch a document from the NeuroJSON CouchDB API.
+
+    Parameters
+    ----------
+    database : str — database name (e.g. 'brainmeshlibrary', 'mcx').
+    document : str — document ID (e.g. 'colin27', 'BrainWeb--Subject04--head--tet').
+    cache : bool — cache to ~/.cache/dot-jax/neurojson/.
+
+    Returns
+    -------
+    data : dict — parsed JSON document.
+    """
+    cache_dir = Path.home() / ".cache/dot-jax/neurojson"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_dir / f"{database}_{document}.json"
+
+    if cache and cache_file.exists():
+        with open(cache_file) as f:
+            return json.load(f)
+
+    import subprocess
+    url = f"https://neurojson.io:7777/{database}/{document}"
+    result = subprocess.run(
+        ["curl", "-sk", url],
+        capture_output=True, text=True, timeout=120,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to fetch {url}: {result.stderr}")
+
+    data = json.loads(result.stdout)
+
+    if cache:
+        with open(cache_file, "w") as f:
+            json.dump(data, f)
+
+    return data
+
+
+def get_mcx_optical_properties(benchmark="colin27"):
+    """Get tissue optical properties from an MCX benchmark.
+
+    Parameters
+    ----------
+    benchmark : str — MCX benchmark name (e.g. 'colin27', '4layer_head').
+
+    Returns
+    -------
+    properties : dict
+        Maps tissue label (int) to dict with keys:
+        'mua', 'mus', 'g', 'n', 'musp', 'name'.
+    """
+    data = fetch_neurojson("mcx", benchmark)
+    media = data["Domain"]["Media"]
+
+    # Standard MCX tissue names per benchmark
+    _names = {
+        "colin27": {0: "background", 1: "scalp", 2: "skull", 3: "CSF",
+                    4: "gray_matter", 5: "white_matter", 6: "air"},
+        "4layer_head": {0: "background", 1: "scalp", 2: "CSF",
+                        3: "gray_matter", 4: "white_matter"},
+    }
+    names = _names.get(benchmark, {})
+
+    props = {}
+    for i, m in enumerate(media):
+        musp = m["mus"] * (1 - m["g"]) if m["mus"] > 0 else 0.0
+        props[i] = {
+            "mua": m["mua"],
+            "mus": m["mus"],
+            "g": m["g"],
+            "n": m["n"],
+            "musp": musp,
+            "name": names.get(i, f"tissue_{i}"),
+        }
+    return props
+
+
+def load_brain_mesh(atlas="BrainWeb", subject="Subject04"):
+    """Load a pre-built brain mesh from the NeuroJSON BrainMeshLibrary.
+
+    Parameters
+    ----------
+    atlas : str — 'BrainWeb' or 'NDMRI'.
+    subject : str — subject/age identifier (e.g. 'Subject04', '20-24Years3T').
+
+    Returns
+    -------
+    mesh : FEMMesh — tetrahedral mesh ready for forward modelling.
+    tissue_labels : (ne,) int — tissue label per element
+        (1=scalp, 2=skull, 3=CSF, 4=GM, 5=WM).
+    """
+    from .mesh import FEMMesh
+
+    doc_id = f"{atlas}--{subject}--head--tet"
+    data = fetch_neurojson("brainmeshlibrary", doc_id)
+    parsed = read_jmesh(data)
+
+    node = parsed["node"]
+    elem = parsed["elem"]
+    labels = parsed.get("elem_labels", np.ones(len(elem), dtype=np.int32))
+
+    mesh = FEMMesh.create(
+        jnp.array(node, dtype=jnp.float64),
+        jnp.array(elem, dtype=jnp.int32),
+    )
+
+    return mesh, labels

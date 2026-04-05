@@ -12,7 +12,10 @@ from .assembly import assemble_stiffness, assemble_mass, assemble_boundary, asse
 from .forward import forward_cw, forward_cw_sparse, locate_sources, assemble_rhs, get_detector_values
 from .spectral import spectral_forward_cw, compute_jacobian_mua
 from .recon import reconstruct_mua
-from .io import read_snirf, load_bids_nirs, snirf_to_dot_jax, SnirfData, BidsNirsRun
+from .io import (
+    read_snirf, load_bids_nirs, snirf_to_dot_jax, SnirfData, BidsNirsRun,
+    read_jmesh, fetch_neurojson, get_mcx_optical_properties, load_brain_mesh,
+)
 from .hemodynamics import (
     intensity_to_od, bandpass_filter, downsample, spectral_unmix,
     compute_channel_snr, prune_channels,
