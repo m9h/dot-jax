@@ -12,6 +12,7 @@ from dot_jax.mesh import FEMMesh
 from dot_jax.forward import forward_cw
 from dot_jax.recon import (
     reconstruct_mua,
+    solve_dual,
     compute_lcurve,
     select_lambda_lcurve,
     select_lambda_gcv,
@@ -140,6 +141,51 @@ class TestReconstructMua:
 # ---------------------------------------------------------------------------
 # Regularization parameter selection
 # ---------------------------------------------------------------------------
+
+class TestSolveDual:
+    def test_shape(self):
+        J = jax.random.normal(jax.random.PRNGKey(0), (10, 50))
+        data = jax.random.normal(jax.random.PRNGKey(1), (10,))
+        x = solve_dual(J, data, reg=0.01)
+        assert x.shape == (50,)
+
+    def test_finite(self):
+        J = jax.random.normal(jax.random.PRNGKey(0), (10, 50))
+        data = jax.random.normal(jax.random.PRNGKey(1), (10,))
+        x = solve_dual(J, data, reg=0.01)
+        assert jnp.all(jnp.isfinite(x))
+
+    def test_recovers_signal(self):
+        """Dual solve should recover a known signal."""
+        key = jax.random.PRNGKey(42)
+        J = jax.random.normal(key, (20, 8))
+        x_true = jnp.ones(8) * 0.01
+        data = J @ x_true
+        x_rec = solve_dual(J, data, reg=1e-6)
+        npt.assert_allclose(x_rec, x_true, atol=1e-3)
+
+    def test_underdetermined(self):
+        """Should work when n_nodes >> n_meas."""
+        J = jax.random.normal(jax.random.PRNGKey(0), (5, 100))
+        data = jax.random.normal(jax.random.PRNGKey(1), (5,))
+        x = solve_dual(J, data, reg=0.1)
+        assert x.shape == (100,)
+        assert jnp.all(jnp.isfinite(x))
+
+    def test_matches_primal_for_overdetermined(self):
+        """For overdetermined systems, dual and primal should agree."""
+        J = jax.random.normal(jax.random.PRNGKey(0), (20, 8))
+        data = jax.random.normal(jax.random.PRNGKey(1), (20,))
+        x_dual = solve_dual(J, data, reg=0.1)
+        # Primal: (J^T J + reg*I)^{-1} J^T d
+        JtJ = J.T @ J
+        x_primal = jnp.linalg.solve(
+            JtJ + 0.1 * jnp.sqrt(jnp.linalg.norm(JtJ)) * jnp.eye(8),
+            J.T @ data,
+        )
+        # Should be close (not identical due to different reg scaling)
+        assert jnp.corrcoef(x_dual, x_primal)[0, 1] > 0.9
+
 
 @pytest.fixture
 def lcurve_setup():

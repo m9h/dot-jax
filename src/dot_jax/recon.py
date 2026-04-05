@@ -16,6 +16,7 @@ References
 
 Functions:
     reconstruct_mua: Linearised mua reconstruction from perturbation data
+    solve_dual: Dual-formulation regularised solve (Kernel/Holoscan style)
     compute_lcurve: L-curve for regularization parameter selection
     select_lambda_lcurve: Optimal lambda at L-curve corner
     select_lambda_gcv: Optimal lambda via Generalized Cross-Validation
@@ -97,6 +98,34 @@ def reconstruct_mua(mesh, data, srcpos, detpos, mua0, musp,
         musp=jnp.full(nn, musp),
         residuals=jnp.array(residuals),
     )
+
+
+def solve_dual(J, data, reg=0.01):
+    """Dual-formulation regularised solve for underdetermined systems.
+
+    Solves x = J^T (J J^T + lambda * sqrt(||JJ^T||) * I)^{-1} d
+
+    This is more efficient than the primal form when n_nodes >> n_meas
+    (underdetermined case typical in DOT). Based on the Kernel/NVIDIA
+    Holoscan BCI reconstruction pipeline.
+
+    Parameters
+    ----------
+    J : (n_meas, n_nodes) — Jacobian/sensitivity matrix.
+    data : (n_meas,) — measurement vector.
+    reg : float — regularization parameter.
+
+    Returns
+    -------
+    x : (n_nodes,) — reconstructed parameter vector.
+    """
+    JJt = J @ J.T
+    norm_scale = jnp.sqrt(jnp.linalg.norm(JJt))
+    H_reg = JJt + reg * norm_scale * jnp.eye(J.shape[0])
+    # Symmetrise for numerical stability
+    H_reg = 0.5 * (H_reg + H_reg.T)
+    alpha = jnp.linalg.solve(H_reg, data)
+    return J.T @ alpha
 
 
 # =============================================================================
