@@ -26,3 +26,4 @@ from .hemodynamics import (
 from .mesh import smooth_on_mesh
 from .recon import compute_lcurve, select_lambda_lcurve, select_lambda_gcv, solve_dual
 from .td_forward import assemble_mass_time, td_source_pulse, td_forward_cw, dtof_moments
+from .realtime import RealtimePipeline, EpochAccumulator
