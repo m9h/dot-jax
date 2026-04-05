@@ -59,10 +59,13 @@ event markers via:
 - Can send markers via WebSocket to the dot-jax dashboard
 
 **Alternative: EEG-ExPy** (NeuroTechX)
-- Built-in paradigms (N170, P300, SSVEP, N-back)
-- Kernel Flow support via John Griffiths' contributions
-- PsychoPy backend
+- Built-in paradigms: P300, N170, SSVEP, SSAEP, mental imagery
+- **Does not include N-back** — would need custom implementation
+- Kernel Flow support via BrainFlow backend (John Griffiths' contributions)
+- PsychoPy backend, LSL event markers
 - Good for EEG+fNIRS multimodal experiments
+- For this protocol, **PsychoPy standalone is preferred** since we need
+  a custom N-back task that EEG-ExPy does not provide out of the box
 
 ### 1.3 Computing
 - **Acquisition laptop:** Runs kernel-sdk + PsychoPy, connected to headset
@@ -109,13 +112,35 @@ the letter shown 2 items ago."
 - Engages working memory maintenance and updating
 - Robustly activates bilateral DLPFC, with left lateralisation for verbal stimuli
 
-### 2.3 Expected fNIRS signal
+### 2.3 Alternative DLPFC tasks
 
-Based on published fNIRS N-back studies:
-- **HbO increase** in DLPFC during 2-back vs 0-back: ~0.5–2.0 μM
-- **Peak latency:** ~8–12 s after block onset
+If N-back is problematic (e.g., subject comprehension issues), these
+alternatives also reliably activate left DLPFC in fNIRS:
+
+| Task | DLPFC activation | Ease of implementation |
+|------|-----------------|----------------------|
+| **Verbal/phonemic fluency** | Strong left DLPFC, most replicated in fNIRS | Very easy (say words starting with F/A/S) |
+| **Stroop** (colour-word) | Bilateral DLPFC | Easy (PsychoPy built-in) |
+| **Go/No-Go** | Right > left DLPFC | Easy |
+| **Tower of London** | Bilateral, planning | Moderate complexity |
+
+For purely left DLPFC lateralisation, **verbal fluency** is the best
+alternative to N-back (Ehlis et al., 2009; Herrmann et al., 2005).
+
+### 2.4 Expected fNIRS signal
+
+Based on published fNIRS N-back studies (Herff et al., 2014; Fishburn
+et al., 2014; Sato et al., 2013):
+
+- **HbO increase** in DLPFC during 2-back vs 0-back: ~0.3–0.8 μM
+- **HbR decrease:** ~0.1–0.3 μM (inverse of HbO, confirming neurovascular coupling)
+- **Onset latency:** ~2–3 s after block onset (hemodynamic delay)
+- **Peak latency:** ~6–8 s into task block
+- **Return to baseline:** ~10–15 s after block offset
 - **Spatial extent:** Channels over F3/F5 (left DLPFC) and F4/F6 (right DLPFC)
 - **Lateralisation:** Left > right for verbal N-back
+- **Reliability:** Test-retest ICC ~0.6–0.8 for DLPFC HbO during N-back
+  (Plichta et al., 2006)
 
 ### 2.4 PsychoPy implementation
 
@@ -385,9 +410,15 @@ sessions to monitor treatment response.
   contraindications (epilepsy, metallic implants, cardiac devices).
 - **Kernel Flow:** Non-invasive, low-power NIR lasers (Class 1). No known
   safety concerns. Remove during TMS.
-- **fNIRS limitations:** Cannot detect deep sources (sgACC is too deep for
-  fNIRS). The DLPFC surface activation is a proxy for the connectivity-based
-  target. This is a limitation vs fMRI-based SAINT targeting.
+- **fNIRS depth limitation:** sgACC is too deep (~40 mm from scalp) for
+  fNIRS photon penetration (~15–20 mm). The SAINT protocol's specific
+  innovation — targeting based on DLPFC-sgACC anticorrelation — cannot be
+  directly replicated with fNIRS alone. Our approach uses a **different
+  biomarker**: maximal DLPFC task activation during N-back, which is a proxy
+  for the functionally relevant DLPFC subregion. The TRIBE structural
+  connectivity prior (Section 7) partially compensates by predicting deep
+  source (sgACC) involvement from white matter pathways that fNIRS cannot
+  directly measure.
 - **Ethics:** Standard institutional ethics approval for non-invasive brain
   stimulation research.
 
