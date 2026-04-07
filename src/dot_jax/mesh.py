@@ -96,14 +96,17 @@ class FEMMesh(eqx.Module):
 
     @property
     def nn(self):
+        """Number of nodes in the mesh."""
         return self.node.shape[0]
 
     @property
     def ne(self):
+        """Number of tetrahedral elements in the mesh."""
         return self.elem.shape[0]
 
     @property
     def nf(self):
+        """Number of boundary triangular faces."""
         return self.face.shape[0]
 
 
@@ -166,21 +169,37 @@ def compute_deldotdel(node, elem, evol):
         ordered (0,0),(0,1),(0,2),(0,3),(1,1),(1,2),(1,3),(2,2),(2,3),(3,3).
     delphi : (ne, 3, 4) gradient components per element.
     """
-    # Node coordinates per element: (ne, 4, 3) → transpose to (ne, 3, 4)
+    # Gather node coordinates for each element: (ne, 4, 3).
+    # Transpose to (ne, 3, 4) so that the spatial dimension is axis 1
+    # and basis function index is axis 2.
     no = node[elem].transpose(0, 2, 1)
 
+    # 1 / (6 * V_e) is the scaling factor for the gradient of a linear
+    # tetrahedral basis function.
     evol_inv = 1.0 / (evol * 6.0)
 
-    # Cross-product column indices (matches redbirdpy exactly)
+    # Cross-product column index table.  For each basis function i,
+    # col[i] gives the 4 node indices used in the cofactor expansion
+    # of the (3x3) sub-determinant that defines grad(phi_i).
+    # This matches the redbirdpy deldotdel implementation exactly.
     col = jnp.array([[3, 1, 2, 1], [2, 0, 3, 2], [1, 3, 0, 3], [0, 2, 1, 0]])
 
     delphi = jnp.zeros((node.shape[0], 3, 4)).at[:1].get()  # dummy for shape
-    # Build delphi: (ne, 3, 4)
+
+    # Build the gradient tensor delphi: (ne, 3, 4).
+    # delphi[:, c, i] is the c-th spatial component of grad(phi_i)
+    # for all elements.  The gradient is computed from the cofactors
+    # of the Jacobian matrix of the affine mapping from the reference
+    # tetrahedron to the physical element.
     parts = []
     for coord in range(3):
+        # Select the two coordinate indices *other* than coord for
+        # the 2x2 cofactor.
         idx = [c for c in range(3) if c != coord]
         coord_parts = []
         for i in range(4):
+            # 2x2 determinant via cross-differences of the node
+            # coordinates at the cofactor indices.
             term1 = no[:, idx[0], col[i, 0]] - no[:, idx[0], col[i, 1]]
             term2 = no[:, idx[1], col[i, 2]] - no[:, idx[1], col[i, 3]]
             term3 = no[:, idx[0], col[i, 2]] - no[:, idx[0], col[i, 3]]
@@ -190,13 +209,17 @@ def compute_deldotdel(node, elem, evol):
 
     delphi = jnp.stack(parts, axis=1)  # (ne, 3, 4)
 
-    # 10 unique dot products: upper triangle of (i, j) for 4 basis functions
+    # Compute the 10 unique dot products grad(phi_i) . grad(phi_j)
+    # for basis function pairs (i, j) with i <= j.  The ordering is:
+    # (0,0),(0,1),(0,2),(0,3),(1,1),(1,2),(1,3),(2,2),(2,3),(3,3).
     pairs = []
     for i in range(4):
         for j in range(i, 4):
             pairs.append(jnp.sum(delphi[:, :, i] * delphi[:, :, j], axis=1))
 
     dd = jnp.stack(pairs, axis=1)  # (ne, 10)
+    # Multiply by element volume to get the fully-integrated product
+    # integral_Omega_e grad(phi_i) . grad(phi_j) dV.
     dd = dd * evol[:, None]
 
     return dd, delphi
@@ -328,18 +351,21 @@ def smooth_on_mesh(mesh, node_values, fwhm=13.0):
     """
     node = jnp.asarray(mesh.node)
     nn = node.shape[0]
+    # Convert FWHM to Gaussian sigma (FWHM = 2*sqrt(2*ln2) * sigma).
     sigma = fwhm / 2.3548  # FWHM to sigma
 
-    # Pairwise distance matrix (nn, nn)
+    # Pairwise squared-distance matrix between all node pairs.
     diff = node[:, None, :] - node[None, :, :]  # (nn, nn, 3)
     dist2 = jnp.sum(diff ** 2, axis=2)           # (nn, nn)
 
-    # Gaussian kernel, truncated at 2*fwhm
+    # Gaussian kernel with hard truncation at 2*fwhm to limit the
+    # effective support and avoid distant contributions.
     cutoff2 = (2.0 * fwhm) ** 2
     kernel = jnp.exp(-dist2 / (2.0 * sigma ** 2))
     kernel = jnp.where(dist2 <= cutoff2, kernel, 0.0)
 
-    # Normalize rows
+    # Row-normalise so that each output node is a weighted average
+    # of its neighbours (preserves signal mean).
     row_sums = jnp.sum(kernel, axis=1, keepdims=True)
     kernel = kernel / jnp.maximum(row_sums, 1e-30)
 

@@ -43,28 +43,61 @@ from math import factorial as _factorial
 
 
 def _j0(z):
+    """Spherical Bessel function j_0(z) = sin(z)/z."""
     return jnp.sin(z) / z
 
 
 def _j1(z):
+    """Spherical Bessel function j_1(z) = sin(z)/z^2 - cos(z)/z."""
     return jnp.sin(z) / z**2 - jnp.cos(z) / z
 
 
 def _y0(z):
+    """Spherical Neumann function y_0(z) = -cos(z)/z."""
     return -jnp.cos(z) / z
 
 
 def _y1(z):
+    """Spherical Neumann function y_1(z) = -cos(z)/z^2 - sin(z)/z."""
     return -jnp.cos(z) / z**2 - jnp.sin(z) / z
 
 
 def _bessel_recurrence(fn_prev, fn_curr, n, z):
-    """Upward recurrence: f_{n+1}(z) = (2n+1)/z * f_n(z) - f_{n-1}(z)."""
+    """Apply the spherical Bessel upward recurrence relation.
+
+    f_{n+1}(z) = (2n+1)/z * f_n(z) - f_{n-1}(z)
+
+    Parameters
+    ----------
+    fn_prev : array — f_{n-1}(z).
+    fn_curr : array — f_n(z).
+    n : int — current order.
+    z : array — argument.
+
+    Returns
+    -------
+    fn_next : array — f_{n+1}(z).
+    """
     return (2 * n + 1) / z * fn_curr - fn_prev
 
 
 def _spherical_bessel(z, f0_fn, f1_fn, order):
-    """Compute spherical Bessel function of given order via recurrence."""
+    """Evaluate a spherical Bessel function at arbitrary order.
+
+    Uses closed-form expressions for orders 0 and 1, then applies
+    upward recurrence via ``jax.lax.scan`` for higher orders.
+
+    Parameters
+    ----------
+    z : array — argument.
+    f0_fn : callable — function returning f_0(z).
+    f1_fn : callable — function returning f_1(z).
+    order : int — desired order (>= 0).
+
+    Returns
+    -------
+    result : array — f_{order}(z).
+    """
     f0 = f0_fn(z)
     if order == 0:
         return f0
@@ -82,19 +115,61 @@ def _spherical_bessel(z, f0_fn, f1_fn, order):
 
 
 def spbesselj(n, z):
-    """Spherical Bessel function of the first kind j_n(z)."""
+    """Spherical Bessel function of the first kind j_n(z).
+
+    Parameters
+    ----------
+    n : int
+        Order (>= 0).
+    z : array_like
+        Argument.
+
+    Returns
+    -------
+    jn : jnp.ndarray
+        j_n(z).
+    """
     z = jnp.asarray(z, dtype=jnp.float64)
     return _spherical_bessel(z, _j0, _j1, n)
 
 
 def spbessely(n, z):
-    """Spherical Bessel function of the second kind (Neumann) y_n(z)."""
+    """Spherical Bessel function of the second kind (Neumann) y_n(z).
+
+    Parameters
+    ----------
+    n : int
+        Order (>= 0).
+    z : array_like
+        Argument.
+
+    Returns
+    -------
+    yn : jnp.ndarray
+        y_n(z).
+    """
     z = jnp.asarray(z, dtype=jnp.float64)
     return _spherical_bessel(z, _y0, _y1, n)
 
 
 def spbesselh(n, k, z):
-    """Spherical Hankel function h_n^(k)(z)."""
+    """Spherical Hankel function h_n^(k)(z).
+
+    Parameters
+    ----------
+    n : int
+        Order (>= 0).
+    k : {1, 2}
+        Kind.  ``k=1`` gives h_n^(1) = j_n + i*y_n;
+        ``k=2`` gives h_n^(2) = j_n - i*y_n.
+    z : array_like
+        Argument.
+
+    Returns
+    -------
+    hn : jnp.ndarray
+        h_n^(k)(z) (complex).
+    """
     jn = spbesselj(n, z)
     yn = spbessely(n, z)
     if k == 1:
@@ -106,10 +181,23 @@ def spbesselh(n, k, z):
 
 
 def spbesseljprime(n, z):
-    """Derivative of spherical Bessel function j'_n(z).
+    """Derivative of the spherical Bessel function j'_n(z).
 
-    Uses recurrence: j'_n(z) = j_{n-1}(z) - (n+1)/z * j_n(z)  for n >= 1
-    and j'_0(z) = -j_1(z).
+    Uses the recurrence relation:
+    ``j'_n(z) = j_{n-1}(z) - (n+1)/z * j_n(z)`` for n >= 1,
+    and ``j'_0(z) = -j_1(z)``.
+
+    Parameters
+    ----------
+    n : int
+        Order (>= 0).
+    z : array_like
+        Argument.
+
+    Returns
+    -------
+    jprime : jnp.ndarray
+        j'_n(z).
     """
     z = jnp.asarray(z, dtype=jnp.float64)
     if n == 0:
@@ -118,7 +206,20 @@ def spbesseljprime(n, z):
 
 
 def spbesselyprime(n, z):
-    """Derivative of spherical Neumann function y'_n(z)."""
+    """Derivative of the spherical Neumann function y'_n(z).
+
+    Parameters
+    ----------
+    n : int
+        Order (>= 0).
+    z : array_like
+        Argument.
+
+    Returns
+    -------
+    yprime : jnp.ndarray
+        y'_n(z).
+    """
     z = jnp.asarray(z, dtype=jnp.float64)
     if n == 0:
         return -spbessely(1, z)
@@ -126,7 +227,22 @@ def spbesselyprime(n, z):
 
 
 def spbesselhprime(n, k, z):
-    """Derivative of spherical Hankel function h'^(k)_n(z)."""
+    """Derivative of the spherical Hankel function h'^(k)_n(z).
+
+    Parameters
+    ----------
+    n : int
+        Order (>= 0).
+    k : {1, 2}
+        Kind (see :func:`spbesselh`).
+    z : array_like
+        Argument.
+
+    Returns
+    -------
+    hprime : jnp.ndarray
+        h'^(k)_n(z) (complex).
+    """
     jp = spbesseljprime(n, z)
     yp = spbesselyprime(n, z)
     if k == 1:
@@ -145,8 +261,25 @@ def spbesselhprime(n, k, z):
 def spharmonic(l, m, theta, phi):
     """Spherical harmonic Y_l^m(theta, phi).
 
-    theta: polar angle (0 to pi), phi: azimuthal angle (0 to 2*pi).
-    Uses the convention matching MATLAB/redbirdpy.
+    Uses the real-valued convention matching MATLAB and redbirdpy.
+    The associated Legendre polynomial is evaluated via scipy (outside
+    JIT).
+
+    Parameters
+    ----------
+    l : int
+        Degree (>= 0).
+    m : int
+        Order (``-l <= m <= l``).
+    theta : array_like
+        Polar angle in radians (0 to pi).
+    phi : array_like
+        Azimuthal angle in radians (0 to 2*pi).
+
+    Returns
+    -------
+    Ylm : complex scalar or jnp.ndarray
+        Y_l^m evaluated at the given angles.
     """
     theta = jnp.atleast_1d(jnp.asarray(theta, dtype=jnp.float64))
     phi = jnp.atleast_1d(jnp.asarray(phi, dtype=jnp.float64))
@@ -175,9 +308,25 @@ def spharmonic(l, m, theta, phi):
 
 
 def getreff(n_in, n_out=1.0):
-    """Effective reflection coefficient (Haskell 1994).
+    """Effective reflection coefficient for the extrapolated boundary.
 
-    Numerical integration of Fresnel reflectance over all angles.
+    Numerically integrates the Fresnel reflectance over all incidence
+    angles to obtain the effective reflection coefficient R_eff used in
+    the Robin boundary condition for the photon diffusion equation.
+    Follows Haskell et al. (1994), Eq. 8-10.
+
+    Parameters
+    ----------
+    n_in : float
+        Refractive index of the scattering medium (tissue).
+    n_out : float
+        Refractive index of the external medium (default: air, 1.0).
+
+    Returns
+    -------
+    Reff : float
+        Effective internal reflection coefficient in [0, 1).
+        Returns 0.0 when ``n_in <= n_out`` (no internal reflection).
     """
     n_in = jnp.asarray(n_in, dtype=jnp.float64)
     n_out = jnp.asarray(n_out, dtype=jnp.float64)
@@ -187,39 +336,56 @@ def getreff(n_in, n_out=1.0):
         return 0.0
 
     def _compute(_):
+        # Critical angle for total internal reflection (Snell's law).
         oc = jnp.arcsin(n_out / n_in)
         ostep = jnp.pi / 2000
 
+        # Incidence angles from 0 to pi/2 (hemisphere).
         o = jnp.arange(0, jnp.pi / 2, ostep)
         n_steps = o.shape[0]
 
-        # Critical angle mask
+        # Mask: angles below critical angle have partial reflection;
+        # above the critical angle there is total internal reflection.
         below_crit = o < oc
 
         coso = jnp.cos(o)
         sino = jnp.sin(o)
+        # Transmitted angle cosine via Snell's law (clamped to avoid sqrt of negative).
         cosop = jnp.sqrt(jnp.maximum(1 - (n_in * sino) ** 2, 0.0))
 
-        # Fresnel reflectance
+        # Fresnel reflectance for s- and p-polarized light.
         r_s = ((n_in * cosop - n_out * coso) / (n_in * cosop + n_out * coso)) ** 2
         r_p = ((n_in * coso - n_out * cosop) / (n_in * coso + n_out * cosop)) ** 2
         r_fres = 0.5 * (r_s + r_p)
 
-        # Total internal reflection above critical angle
+        # Above critical angle: total internal reflection (R = 1).
         r_fres = jnp.where(below_crit, r_fres, 1.0)
 
+        # Haskell Eq. 8-9: angular integrals R_phi and R_J weighted
+        # by sin(theta)*cos(theta) and sin(theta)*cos^2(theta).
         r_phi = 2 * jnp.sum(sino * coso * r_fres) * ostep
         r_j = 3 * jnp.sum(sino * coso**2 * r_fres) * ostep
 
+        # Haskell Eq. 10: effective reflection coefficient.
         return (r_phi + r_j) / (2 - r_phi + r_j)
 
     return jax.lax.cond(n_in <= n_out, _zero, _compute, None)
 
 
 def getdistance(srcpos, detpos):
-    """Euclidean distance matrix between sources and detectors.
+    """Compute Euclidean distance matrix between sources and detectors.
 
-    Returns (Ndet, Nsrc) matrix.
+    Parameters
+    ----------
+    srcpos : (n_src, 3) array_like
+        Source positions.
+    detpos : (n_det, 3) array_like
+        Detector positions.
+
+    Returns
+    -------
+    dist : (n_det, n_src) jnp.ndarray
+        Pairwise Euclidean distances.
     """
     srcpos = jnp.atleast_2d(jnp.asarray(srcpos, dtype=jnp.float64))
     detpos = jnp.atleast_2d(jnp.asarray(detpos, dtype=jnp.float64))
@@ -281,19 +447,27 @@ def semi_infinite_cw(mua, musp, n_in, n_out, srcpos, detpos):
     srcpos = jnp.atleast_2d(jnp.asarray(srcpos, dtype=jnp.float64))
     detpos = jnp.atleast_2d(jnp.asarray(detpos, dtype=jnp.float64))
 
+    # Diffusion coefficient.
     D = 1.0 / (3.0 * (mua + musp))
     Reff = getreff(n_in, n_out)
+    # Effective attenuation coefficient (inverse diffusion length).
     mu_eff = jnp.sqrt(mua / D)
+    # Extrapolated boundary distance: the virtual boundary is at z = -zb.
     zb = 2 * D * (1 + Reff) / (1 - Reff)
+    # Transport mean free path: isotropic point source depth.
     z0 = 1.0 / (mua + musp)
 
-    # Real source displaced z0 inward; image source at -(z0 + 2*zb)
+    # Image source method (Haskell 1994, Farrell 1992):
+    #   Real source at depth z0 below surface (positive z).
+    #   Negative image source at -(z0 + 2*zb) to enforce the
+    #   extrapolated boundary condition (phi = 0 at z = -zb).
     src_real = srcpos.at[:, 2].add(z0)
     src_image = srcpos.at[:, 2].add(-z0 - 2 * zb)
 
     r1 = getdistance(src_real, detpos)
     r2 = getdistance(src_image, detpos)
 
+    # Green's function: real source contribution minus image source.
     phi = (1.0 / (4 * jnp.pi * D)) * (
         jnp.exp(-mu_eff * r1) / r1 - jnp.exp(-mu_eff * r2) / r2
     )

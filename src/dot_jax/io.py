@@ -153,7 +153,28 @@ def _find_group(parent, prefix, idx):
 
 
 def _read_positions(probe, prefix):
-    """Read source/detector positions, preferring 3D over 2D."""
+    """Read source or detector positions from the SNIRF probe group.
+
+    Prefers the 3-D dataset (e.g. ``sourcePos3D``) when available.  If
+    only the 2-D dataset exists, a zero-valued z-column is appended.
+
+    Parameters
+    ----------
+    probe : h5py.Group
+        The ``/nirs{N}/probe`` HDF5 group.
+    prefix : str
+        Either ``"sourcePos"`` or ``"detectorPos"``.
+
+    Returns
+    -------
+    positions : (n_optodes, 3) ndarray
+        3-D optode coordinates.
+
+    Raises
+    ------
+    KeyError
+        If neither the 3-D nor 2-D dataset is present.
+    """
     key_3d = f"{prefix}3D"
     key_2d = f"{prefix}2D"
 
@@ -210,7 +231,18 @@ def _read_measurement_list(data_grp):
 
 
 def _ml_sort_key(key):
-    """Sort measurementList keys numerically."""
+    """Extract numeric suffix for sorting measurementList HDF5 keys.
+
+    Parameters
+    ----------
+    key : str
+        HDF5 group key, e.g. ``"measurementList12"``.
+
+    Returns
+    -------
+    sort_val : int
+        Integer extracted from the trailing digits, or 0 if none found.
+    """
     digits = "".join(c for c in key if c.isdigit())
     return int(digits) if digits else 0
 
@@ -364,7 +396,18 @@ def snirf_to_dot_jax(snirf_data, wavelength=None):
 
 
 def _read_json(path):
-    """Read JSON file, return None if missing."""
+    """Read a JSON file and return its parsed contents.
+
+    Parameters
+    ----------
+    path : str or Path
+        File path.  Need not exist.
+
+    Returns
+    -------
+    data : dict or list or None
+        Parsed JSON, or ``None`` if the file does not exist.
+    """
     path = Path(path)
     if not path.exists():
         return None
@@ -373,7 +416,19 @@ def _read_json(path):
 
 
 def _read_tsv(path):
-    """Read TSV into a dict of lists, return None if missing."""
+    """Read a tab-separated-values file into a column-oriented dict.
+
+    Parameters
+    ----------
+    path : str or Path
+        File path.  Need not exist.
+
+    Returns
+    -------
+    columns : dict of list, or None
+        Keys are column headers; values are lists of string cell values.
+        Returns ``None`` if the file does not exist or is empty.
+    """
     path = Path(path)
     if not path.exists():
         return None
@@ -386,7 +441,23 @@ def _read_tsv(path):
 
 
 def _read_events_tsv(path):
-    """Read BIDS events.tsv into (n_events, 3) array [onset, duration, trial_idx]."""
+    """Read a BIDS ``_events.tsv`` file into a structured NumPy array.
+
+    Columns ``onset`` and ``duration`` are read as floats.  The
+    ``trial_type`` column is encoded as a 0-based integer index into the
+    sorted set of unique trial types.
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to an events TSV file.  Need not exist.
+
+    Returns
+    -------
+    events : (n_events, 3) ndarray or None
+        Columns are ``[onset, duration, trial_type_index]``.
+        Returns ``None`` if the file does not exist or is empty.
+    """
     path = Path(path)
     if not path.exists():
         return None
@@ -423,7 +494,32 @@ _JMESH_DTYPE_MAP = {
 
 
 def _resolve_jmesh_data(data_field):
-    """Resolve a JMesh data field: inline string, _DataLink_ URL, or raw bytes."""
+    """Resolve a JMesh data field to raw binary or base64 string.
+
+    JMesh arrays can be stored in several forms: inline base64 strings,
+    ``_DataLink_`` URLs pointing to external binary resources, or raw
+    bytes.  This function normalises all three forms so downstream
+    decoders receive either a base64 string or raw ``bytes``.
+
+    Parameters
+    ----------
+    data_field : str, dict, or bytes
+        The data payload from a JMesh document.  If *dict*, must
+        contain a ``_DataLink_`` key whose value is a URL.
+
+    Returns
+    -------
+    resolved : str or bytes
+        Base64 string (inline) or raw bytes (fetched from URL / passed
+        through).
+
+    Raises
+    ------
+    ValueError
+        If *data_field* is a dict without a ``_DataLink_`` key.
+    TypeError
+        If *data_field* is an unsupported type.
+    """
     import subprocess
 
     if isinstance(data_field, str):
@@ -445,11 +541,27 @@ def _resolve_jmesh_data(data_field):
 
 
 def _decode_jmesh_array(data_field, info):
-    """Decode a JMesh compressed+encoded array.
+    """Decode a JMesh compressed+encoded array into a NumPy array.
 
     JMesh arrays are base64-encoded, optionally zlib-compressed, with
-    metadata in a companion dict. Data may also be a _DataLink_ URL
-    to an external binary resource.
+    metadata in a companion dict.  Data may also be a ``_DataLink_``
+    URL to an external binary resource.
+
+    Parameters
+    ----------
+    data_field : str, dict, or bytes
+        Raw payload (base64 string, ``_DataLink_`` dict, or bytes).
+        Passed through :func:`_resolve_jmesh_data` first.
+    info : dict
+        Companion metadata dict containing any of:
+        ``_ArrayZipType_`` / ``ArrayZipType`` (e.g. ``"zlib"``),
+        ``_ArrayType_`` / ``ArrayType`` (e.g. ``"single"``, ``"double"``),
+        ``_ArraySize_`` / ``ArraySize`` (shape list).
+
+    Returns
+    -------
+    arr : numpy.ndarray
+        Decoded array with dtype and shape determined by *info*.
     """
     import base64
     import zlib

@@ -43,7 +43,17 @@ from .forward import assemble_rhs
 
 
 class TDForwardResult(NamedTuple):
-    """Result of a time-domain forward solve."""
+    """Result of a time-domain forward solve.
+
+    Attributes
+    ----------
+    dtof : jnp.ndarray, shape (n_times, n_det)
+        Distribution of Time-of-Flight at each detector.
+    times : jnp.ndarray, shape (n_times,)
+        Time sample points (seconds).
+    phi_t : jnp.ndarray, shape (n_times, nn)
+        Fluence field at all mesh nodes over time.
+    """
     dtof: jnp.ndarray    # (n_times, n_det) DTOF at each detector
     times: jnp.ndarray   # (n_times,) time points
     phi_t: jnp.ndarray   # (n_times, nn) fluence field over time
@@ -127,25 +137,32 @@ def td_forward_cw(mesh, mua, musp, srcpos, detpos,
     rhs_det = assemble_rhs(mesh, detpos)
     b = rhs_src[:, 0]  # first source
 
-    # Precompute M_t^{-1} A and M_t^{-1} b for efficiency
+    # Pre-multiply by M_t^{-1} to convert the ODE to explicit form:
+    #   dPhi/dt = -M_t^{-1} A Phi + M_t^{-1} b * pulse(t)
+    # This avoids solving a linear system at every RK step.
     Mt_inv_A = jnp.linalg.solve(Mt, A)
     Mt_inv_b = jnp.linalg.solve(Mt, b)
 
+    # Gaussian pulse sigma (FWHM = 2*sqrt(2*ln2)*sigma).
     sigma = pulse_fwhm / 2.3548200450309493
 
     def vector_field(t, y, args):
+        # Normalised Gaussian laser pulse at time t.
         pulse = jnp.exp(-0.5 * (t / sigma) ** 2) / (sigma * jnp.sqrt(2 * jnp.pi))
+        # ODE right-hand side: diffusion/absorption decay + source injection.
         return -Mt_inv_A @ y + Mt_inv_b * pulse
 
-    # Save at specified timepoints
+    # Uniformly spaced output time points.
     ts = jnp.linspace(0, t_max, n_times)
 
+    # Solve with Diffrax Tsit5 (5th-order Runge-Kutta with adaptive stepping).
+    # The initial step size is 1/10 of the pulse FWHM to resolve the source.
     sol = diffrax.diffeqsolve(
         diffrax.ODETerm(vector_field),
         diffrax.Tsit5(),
         t0=0.0,
         t1=t_max,
-        dt0=pulse_fwhm / 10,  # initial step: 1/10 of pulse width
+        dt0=pulse_fwhm / 10,
         y0=jnp.zeros(mesh.nn),
         saveat=diffrax.SaveAt(ts=ts),
         max_steps=16384,
@@ -153,7 +170,8 @@ def td_forward_cw(mesh, mua, musp, srcpos, detpos,
 
     phi_t = sol.ys  # (n_times, nn)
 
-    # DTOF: project fluence onto detectors
+    # Project the full-field fluence onto detector positions to get the
+    # Distribution of Time-of-Flight (DTOF) at each detector.
     dtof = phi_t @ rhs_det  # (n_times, n_det)
 
     return TDForwardResult(dtof=dtof, times=ts, phi_t=phi_t)
@@ -173,15 +191,19 @@ def dtof_moments(dtof, times):
     m1 : (n_det,) — 1st moment (mean time-of-flight).
     m2 : (n_det,) — 2nd moment (variance of time-of-flight).
     """
+    # Time step widths for trapezoidal-like integration.
     dt = jnp.diff(times, prepend=times[0])
 
-    # 0th moment: integral of DTOF
+    # 0th moment: total photon count (proportional to CW intensity).
+    #   m0 = integral DTOF(t) dt
     m0 = jnp.sum(dtof * dt[:, None], axis=0)
 
-    # 1st moment: mean time-of-flight
+    # 1st moment: mean time-of-flight (centroid of the DTOF).
+    #   m1 = integral t * DTOF(t) dt  /  m0
     m1 = jnp.sum(dtof * times[:, None] * dt[:, None], axis=0) / jnp.maximum(m0, 1e-30)
 
-    # 2nd moment: variance
+    # 2nd central moment: variance of the time-of-flight distribution.
+    #   m2 = integral (t - m1)^2 * DTOF(t) dt  /  m0
     m2 = jnp.sum(dtof * (times[:, None] - m1[None, :]) ** 2 * dt[:, None], axis=0) / jnp.maximum(m0, 1e-30)
 
     return m0, m1, m2

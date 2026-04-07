@@ -162,7 +162,23 @@ def project_to_surface(mesh, positions):
 
 
 def _subsample_surface(verts, target):
-    """Farthest-point subsampling of surface vertices."""
+    """Subsample surface vertices using farthest-point sampling.
+
+    Greedily selects the vertex that maximises the minimum distance to
+    all previously selected vertices, producing a well-spaced subset.
+
+    Parameters
+    ----------
+    verts : (N, 3) ndarray
+        Surface vertex positions.
+    target : int
+        Desired number of output vertices.
+
+    Returns
+    -------
+    indices : (target,) ndarray of int
+        Indices into *verts* of the selected subset.
+    """
     n = len(verts)
     if n <= target:
         return np.arange(n)
@@ -180,7 +196,29 @@ def _subsample_surface(verts, target):
 
 
 def _sample_interior(mask, origin, max_vol, max_pts):
-    """Sample interior points at regular spacing."""
+    """Sample interior points on a regular grid within a binary mask.
+
+    Generates candidate points on a grid whose spacing is derived from
+    ``max_vol``, retains only those inside the mask, then randomly
+    subsamples to at most ``max_pts``.
+
+    Parameters
+    ----------
+    mask : (X, Y, Z) ndarray of bool
+        Binary brain mask in voxel space.
+    origin : (3,) ndarray
+        MNI coordinate of voxel (0, 0, 0).
+    max_vol : float
+        Target maximum element volume (mm^3).  Controls grid spacing
+        via ``spacing = max_vol^(1/3)``.
+    max_pts : int
+        Maximum number of interior points to return.
+
+    Returns
+    -------
+    pts : (M, 3) ndarray
+        Interior point coordinates in MNI space (mm).
+    """
     if max_pts <= 0:
         return np.empty((0, 3))
 

@@ -59,6 +59,13 @@ def assemble_stiffness(mesh, D):
 
     K = jnp.zeros((nn, nn))
 
+    # Loop over the 10 unique pairs (i, j) with i <= j among the 4
+    # tet basis functions.  dd[:, k] stores the pre-integrated product
+    # grad(phi_i) . grad(phi_j) * V_e for each element.  Multiplying
+    # by D_e gives the element contribution to the global stiffness
+    # matrix.  The scatter-add (.at[].add) assembles these into the
+    # global (nn x nn) matrix.  Off-diagonal entries are symmetric,
+    # so we add to both (i,j) and (j,i).
     k = 0
     for i in range(4):
         for j in range(i, 4):
@@ -96,10 +103,17 @@ def assemble_mass(mesh, mua):
     if mua.ndim == 0 or mua.shape[0] == 1:
         mua = jnp.broadcast_to(mua.ravel()[0], (mesh.ne,))
 
+    # Product mua_e * V_e weights the consistent mass contribution of
+    # each element.
     mua_evol = mua * evol
 
     M = jnp.zeros((nn, nn))
 
+    # Linear tetrahedral consistent mass coefficients:
+    #   diagonal (i == j): integral of phi_i^2 over tet = V_e / 10
+    #   off-diag (i != j): integral of phi_i * phi_j   = V_e / 20
+    # The 0.10 and 0.05 below already incorporate the 1/V_e factor
+    # that cancels against the V_e in mua_evol (net: mua * V_e * coeff).
     for i in range(4):
         for j in range(i, 4):
             rows = elem[:, i]
@@ -134,11 +148,22 @@ def assemble_boundary(mesh, n_in, n_out=1.0):
     face = mesh.face
     area = mesh.area
 
+    # Effective internal reflection coefficient from Haskell et al. (1994).
     Reff = getreff(n_in, n_out)
+
+    # Robin BC surface integral coefficient.
+    # From the extrapolated boundary condition:
+    #   phi + 2*A*D * dphi/dn = 0,  A = (1+Reff)/(1-Reff)
+    # The surface mass matrix entry for triangular faces uses:
+    #   bc_coeff = (1 - Reff) / (12 * (1 + Reff))
     bc_coeff = (1.0 - Reff) / (12.0 * (1.0 + Reff))
 
     C = jnp.zeros((nn, nn))
 
+    # Assemble over boundary triangular faces.  The consistent mass
+    # coefficients for a linear triangle are:
+    #   diagonal (i == j):  area_f * bc_coeff
+    #   off-diag (i != j):  area_f * bc_coeff * 0.5
     for i in range(3):
         for j in range(i, 3):
             rows = face[:, i]
@@ -169,10 +194,18 @@ def assemble_system_cw(mesh, mua, musp, n_in=1.37, n_out=1.0):
     """
     mua = jnp.asarray(mua, dtype=jnp.float64)
     musp = jnp.asarray(musp, dtype=jnp.float64)
+
+    # Diffusion coefficient: D = 1 / (3 * (mua + musp))
     D = 1.0 / (3.0 * (mua + musp))
 
+    # Stiffness K encodes diffusion (gradient-gradient bilinear form),
+    # Mass M encodes absorption, and Boundary C enforces the Robin BC
+    # on the extrapolated boundary.
     K = assemble_stiffness(mesh, D)
     M = assemble_mass(mesh, mua)
     C = assemble_boundary(mesh, n_in, n_out)
 
+    # The combined system A = K + M + C is symmetric positive definite
+    # when mua > 0 and musp > 0, ensuring a unique solution to the
+    # CW diffusion equation.
     return K + M + C

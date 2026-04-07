@@ -12,6 +12,33 @@ copyright = "2026, Morgan G Hough"
 author = "Morgan G Hough"
 release = "0.1.0"
 
+# -- Mock imports for heavy/optional dependencies ---------------------------
+
+autodoc_mock_imports = [
+    "jax",
+    "jaxlib",
+    "equinox",
+    "diffrax",
+    "optax",
+    "lineax",
+    "optimistix",
+    "jaxtyping",
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "h5py",
+    "nibabel",
+    "trimesh",
+    "meshio",
+    "iso2mesh",
+    "redbirdpy",
+    "redbird",
+    "aiohttp",
+    "websockets",
+    "skimage",
+    "nilearn",
+]
+
 # -- General configuration ---------------------------------------------------
 
 extensions = [
@@ -23,6 +50,7 @@ extensions = [
     "sphinx.ext.mathjax",
     "numpydoc",
     "myst_parser",
+    "sphinx_autodoc_typehints",
 ]
 
 templates_path = ["_templates"]
@@ -38,6 +66,8 @@ autodoc_default_options = {
 }
 autodoc_typehints = "description"
 autosummary_generate = True
+typehints_fully_qualified = False
+always_document_param_types = True
 
 # -- Options for numpydoc ----------------------------------------------------
 

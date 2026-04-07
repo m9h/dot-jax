@@ -69,17 +69,22 @@ def locate_sources(mesh, positions):
 
         for e in range(elem.shape[0]):
             n0, n1, n2, n3 = node[elem[e]]
-            # Solve for barycentric coords: pt = l0*n0 + l1*n1 + l2*n2 + l3*n3
-            # with l0 + l1 + l2 + l3 = 1
+            # Barycentric coordinates via the affine transform:
+            #   pt = l0*n0 + l1*n1 + l2*n2 + l3*n3,  l0+l1+l2+l3 = 1
+            # Substituting l0 = 1 - l1 - l2 - l3 gives:
+            #   T @ [l1, l2, l3]^T = pt - n0
+            # where T = [n1-n0, n2-n0, n3-n0].
             T = np.column_stack([n1 - n0, n2 - n0, n3 - n0])
             try:
                 lam = np.linalg.solve(T, pt - n0)
             except np.linalg.LinAlgError:
-                continue
+                continue  # degenerate element, skip
             l0 = 1.0 - lam[0] - lam[1] - lam[2]
             b = np.array([l0, lam[0], lam[1], lam[2]])
 
-            # Pick element where all bary coords are most interior
+            # The point is inside the tetrahedron iff all bary coords >= 0.
+            # We pick the element that maximises min(bary), i.e. the one
+            # where the point is most interior.
             min_b = np.min(b)
             if min_b > best_min:
                 best_min = min_b
@@ -87,6 +92,8 @@ def locate_sources(mesh, positions):
                 best_bary = b
 
         elem_idx[p] = best_elem
+        # Clamp any slightly-negative bary coords (point on boundary)
+        # and renormalise to ensure they sum to 1.
         bary[p] = np.maximum(best_bary, 0.0)
         bary[p] /= bary[p].sum()  # renormalize
 
@@ -157,14 +164,17 @@ def forward_cw(mesh, mua, musp, srcpos, detpos, n_in=1.37, n_out=1.0):
         detval : (n_det, n_src) — detector measurements.
         phi : (nn, n_src) — fluence field at all nodes.
     """
-    # Assemble system matrix (differentiable w.r.t. mua, musp)
+    # Assemble system matrix A = K + M + C (differentiable w.r.t. mua, musp).
     A = assemble_system_cw(mesh, mua, musp, n_in, n_out)
 
-    # Assemble source/detector RHS (not differentiable — positions are fixed)
+    # Assemble source/detector RHS vectors via barycentric interpolation.
+    # These depend only on geometry (not optical properties), so they are
+    # not part of the differentiable computation graph.
     rhs_src = assemble_rhs(mesh, srcpos)
     rhs_det = assemble_rhs(mesh, detpos)
 
-    # Solve via Lineax (one column per source)
+    # Solve A @ phi_k = rhs_src_k for each source k using dense LU.
+    # vmap parallelises over the n_src right-hand-side columns.
     operator = lx.MatrixLinearOperator(A)
 
     def solve_col(b):
@@ -172,7 +182,8 @@ def forward_cw(mesh, mua, musp, srcpos, detpos, n_in=1.37, n_out=1.0):
 
     phi = jax.vmap(solve_col, in_axes=1, out_axes=1)(rhs_src)
 
-    # Extract detector values
+    # Extract detector values via the adjoint (reciprocity) relation:
+    #   detval[d, s] = rhs_det[:, d]^T @ phi[:, s]
     detval = get_detector_values(phi, rhs_det)
 
     return ForwardResult(detval=detval, phi=phi)
@@ -209,13 +220,17 @@ def forward_cw_sparse(mesh, mua, musp, srcpos, detpos,
         detval : (n_det, n_src) — detector measurements.
         phi : (nn, n_src) — fluence field at all nodes.
     """
-    # Assemble dense system matrix (differentiable)
+    # Assemble the dense CW system matrix A = K + M + C.
+    # This is differentiable w.r.t. mua and musp via JAX autodiff.
     A = assemble_system_cw(mesh, mua, musp, n_in, n_out)
 
-    # Convert to sparse BCSR
+    # Convert to Block-CSR sparse format.  Only non-zero entries are
+    # stored, reducing memory from O(nn^2) to O(nnz).
     A_sp = jsp.BCSR.fromdense(A)
 
-    # Build sparse CG operator (SPD system)
+    # Wrap the sparse matvec as a Lineax FunctionLinearOperator.
+    # The positive_semidefinite_tag tells CG that the system is SPD,
+    # which is guaranteed when mua, musp > 0.
     def matvec(v):
         return A_sp @ v
 
@@ -226,16 +241,17 @@ def forward_cw_sparse(mesh, mua, musp, srcpos, detpos,
     )
     solver = lx.CG(rtol=rtol, atol=atol)
 
-    # Assemble RHS (not differentiable — positions are fixed)
+    # Assemble source/detector RHS vectors (geometry only, not differentiable).
     rhs_src = assemble_rhs(mesh, srcpos)
     rhs_det = assemble_rhs(mesh, detpos)
 
-    # Solve one column per source
+    # Solve A @ phi_k = rhs_src_k for each source via CG.
     def solve_col(b):
         return lx.linear_solve(operator, b, solver=solver).value
 
     phi = jax.vmap(solve_col, in_axes=1, out_axes=1)(rhs_src)
 
+    # Extract detector measurements via the adjoint relation.
     detval = get_detector_values(phi, rhs_det)
 
     return ForwardResult(detval=detval, phi=phi)

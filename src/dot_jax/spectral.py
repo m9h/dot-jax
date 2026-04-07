@@ -100,8 +100,12 @@ def compute_jacobian_mua(mesh, mua, musp, srcpos, detpos,
     n_src = phi_src.shape[1]
     n_det = phi_det.shape[1]
 
-    # J[d*n_src + s, n] = -phi_det[n, d] * phi_src[n, s] * nvol[n]
-    # Using the adjoint formula for absorption perturbation
+    # Adjoint (Frechet derivative) formula for the absorption Jacobian:
+    #   J[d*n_src + s, n] = -phi_det[n, d] * phi_src[n, s] * V_n
+    # where phi_src is the forward Green's function (source → nodes),
+    # phi_det is the adjoint Green's function (detector → nodes), and
+    # V_n is the nodal volume.  Rows are ordered detector-major:
+    # (det0,src0), (det0,src1), ..., (det1,src0), ...
     rows = []
     for d in range(n_det):
         for s in range(n_src):

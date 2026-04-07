@@ -86,26 +86,35 @@ class RealtimePipeline:
         self._channel_maps = {}
 
         for w_idx in range(len(wavelengths)):
-            # All possible src-det pairs
+            # Build the Rytov-normalised Jacobian for this wavelength.
+            # Iterate over all possible source-detector pairs and keep
+            # only those within the valid SD distance range.
             rows = []
             ch_map = []
             for s in range(self.n_src):
                 for d in range(self.n_det):
                     dist = np.sqrt(np.sum((srcpos_np[s] - detpos_np[d]) ** 2))
                     if sd_range[0] <= dist <= sd_range[1]:
+                        # Raw sensitivity (adjoint formula):
+                        #   J_raw[n] = -phi_src[n,s] * phi_det[n,d] * V_n
                         raw = -phi_src[:, s] * phi_det[:, d] * nvol
+                        # Predicted detector reading for normalisation.
                         pred = rhs_det[:, d].T @ phi_src[:, s]
+                        # Rytov normalisation: J / |prediction| gives
+                        # sensitivity to log-amplitude perturbations.
                         rows.append(raw / jnp.maximum(jnp.abs(pred), 1e-30))
                         ch_map.append((s, d))
 
             if rows:
                 J = jnp.stack(rows, axis=0)
-                # Pre-compute pseudoinverse via dual formulation
+                # Pre-compute the regularised pseudoinverse via the dual
+                # formulation (efficient when n_channels << n_nodes):
+                #   Jinv = J^T (J J^T + lambda * ||JJ^T||^{1/2} * I)^{-1}
                 JJt = J @ J.T
                 norm_scale = jnp.sqrt(jnp.linalg.norm(JJt))
                 H_reg = JJt + reg * norm_scale * jnp.eye(J.shape[0])
+                # Symmetrise to improve numerical stability of inversion.
                 H_reg = 0.5 * (H_reg + H_reg.T)
-                # Jinv = J^T (JJ^T + reg*I)^{-1}
                 H_inv = jnp.linalg.inv(H_reg)
                 self.Jinv[w_idx] = J.T @ H_inv  # (nn, n_ch)
             else:
@@ -146,7 +155,15 @@ class RealtimePipeline:
         return hb[0], hb[1]  # hbo, hbr
 
     def get_quality_metrics(self):
-        """Return current quality metrics."""
+        """Return current pipeline quality and status metrics.
+
+        Returns
+        -------
+        metrics : dict
+            Keys: ``frame_count`` (int), ``n_channels`` (dict mapping
+            wavelength index to channel count), ``nn`` (number of mesh
+            nodes).
+        """
         return {
             "frame_count": self._frame_count,
             "n_channels": {w: self.n_channels[w] for w in range(len(self.wavelengths))},
@@ -178,6 +195,7 @@ class EpochAccumulator:
 
     @property
     def n_epochs(self):
+        """Number of completed epochs accumulated so far."""
         return len(self._epochs)
 
     def add_frame(self, hbo, event=False):

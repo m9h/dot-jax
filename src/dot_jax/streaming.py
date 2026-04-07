@@ -46,7 +46,18 @@ class FramePacket:
         self.event_type = event_type
 
     def serialize(self):
-        """Pack into bytes for network transport."""
+        """Pack this frame into a binary buffer for network transport.
+
+        The wire format is:
+        ``[timestamp(f64) | n_ch(i32) | event_len(i32) |
+          data(n_ch*f64) | wl_idx(n_ch*i32) | src_idx(n_ch*i32) |
+          det_idx(n_ch*i32) | event_utf8(event_len)]``
+
+        Returns
+        -------
+        buf : bytes
+            Serialised frame.
+        """
         n_ch = len(self.data)
         event_bytes = (self.event_type or "").encode("utf-8")
         # Header: timestamp(f64) + n_ch(i32) + event_len(i32)
@@ -62,7 +73,17 @@ class FramePacket:
 
     @classmethod
     def deserialize(cls, buf):
-        """Unpack from bytes."""
+        """Reconstruct a FramePacket from a binary buffer.
+
+        Parameters
+        ----------
+        buf : bytes
+            Buffer produced by :meth:`serialize`.
+
+        Returns
+        -------
+        FramePacket
+        """
         offset = 0
         timestamp, n_ch, event_len = struct.unpack_from("<diI", buf, offset)
         offset += struct.calcsize("<diI")
@@ -108,12 +129,47 @@ class SNIRFReplayStreamer:
     @classmethod
     def from_arrays(cls, data, fs, wavelength_values, source_indices,
                     detector_indices, events=None):
+        """Construct a replay streamer from raw arrays.
+
+        Parameters
+        ----------
+        data : (n_frames, n_channels) array_like
+            Intensity time series.
+        fs : float
+            Sampling frequency (Hz).
+        wavelength_values : (n_channels,) array_like
+            Wavelength value per channel.
+        source_indices : (n_channels,) array_like
+            Source index per channel.
+        detector_indices : (n_channels,) array_like
+            Detector index per channel.
+        events : list of (int, str), optional
+            Pairs of (frame_index, event_type).
+
+        Returns
+        -------
+        SNIRFReplayStreamer
+        """
         return cls(data, fs, wavelength_values, source_indices,
                    detector_indices, events)
 
     @classmethod
     def from_snirf(cls, snirf_path, fs=None):
-        """Load from a SNIRF file."""
+        """Construct a replay streamer from a SNIRF file.
+
+        Parameters
+        ----------
+        snirf_path : str or Path
+            Path to a ``.snirf`` file.
+        fs : float, optional
+            Override sampling frequency (Hz).  If ``None``, uses the
+            value stored in the SNIRF metadata, falling back to 4.75 Hz
+            (Kernel Flow default).
+
+        Returns
+        -------
+        SNIRFReplayStreamer
+        """
         from .io import read_snirf, snirf_to_dot_jax
         snirf = read_snirf(str(snirf_path))
         jd = snirf_to_dot_jax(snirf)
@@ -128,10 +184,12 @@ class SNIRFReplayStreamer:
 
     @property
     def n_frames(self):
+        """Total number of frames in the recording."""
         return self._data.shape[0]
 
     @property
     def n_channels(self):
+        """Number of measurement channels."""
         return self._data.shape[1]
 
     def iter_frames(self, realtime=False):
@@ -200,7 +258,19 @@ class ZMQFrameReceiver:
         return None
 
     def iter_frames(self, timeout=1000):
-        """Iterate over incoming frames until timeout with no data."""
+        """Iterate over incoming frames until timeout with no data.
+
+        Parameters
+        ----------
+        timeout : int
+            Timeout in milliseconds to wait between frames.  The
+            iterator terminates when no frame arrives within this
+            window.
+
+        Yields
+        ------
+        FramePacket
+        """
         while True:
             pkt = self.recv(timeout=timeout)
             if pkt is None:
@@ -208,6 +278,7 @@ class ZMQFrameReceiver:
             yield pkt
 
     def close(self):
+        """Close the ZMQ socket and terminate the context."""
         self._sock.close()
         self._ctx.term()
 
@@ -262,7 +333,17 @@ class DashboardServer:
         return state
 
     async def _handler(self, websocket):
-        """WebSocket connection handler."""
+        """Handle a single WebSocket client connection.
+
+        Registers the client, keeps the connection alive, and
+        deregisters on disconnect.  Incoming messages from the client
+        are ignored.
+
+        Parameters
+        ----------
+        websocket : websockets.WebSocketServerProtocol
+            The connected client.
+        """
         self._clients.add(websocket)
         try:
             async for _ in websocket:
@@ -271,7 +352,13 @@ class DashboardServer:
             self._clients.discard(websocket)
 
     async def broadcast(self, state):
-        """Send state to all connected clients."""
+        """Broadcast a JSON-serializable state dict to all connected clients.
+
+        Parameters
+        ----------
+        state : dict
+            Pipeline state (e.g. from :meth:`format_state`).
+        """
         if not self._clients:
             return
         msg = json.dumps(state)
@@ -279,11 +366,12 @@ class DashboardServer:
         websockets.broadcast(self._clients, msg)
 
     async def start(self):
-        """Start the WebSocket server."""
+        """Start the WebSocket server, listening on all interfaces."""
         import websockets
         self._server = await websockets.serve(self._handler, "0.0.0.0", self.port)
 
     async def stop(self):
+        """Gracefully shut down the WebSocket server."""
         if self._server:
             self._server.close()
             await self._server.wait_closed()
