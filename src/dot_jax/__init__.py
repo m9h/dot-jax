@@ -24,6 +24,7 @@ from .hemodynamics import (
     identify_short_channels, regress_short_channels,
 )
 from .mesh import smooth_on_mesh
-from .recon import compute_lcurve, select_lambda_lcurve, select_lambda_gcv, solve_dual
+from .recon import compute_lcurve, select_lambda_lcurve, select_lambda_gcv, solve_dual, reconstruct_image
+from .spectral import normalize_jacobian
 from .td_forward import assemble_mass_time, td_source_pulse, td_forward_cw, dtof_moments
 from .realtime import RealtimePipeline, EpochAccumulator

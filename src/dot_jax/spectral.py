@@ -24,6 +24,7 @@ References
 Functions:
     spectral_forward_cw: Forward solve at multiple wavelengths
     compute_jacobian_mua: Sensitivity matrix d(detval)/d(mua_node)
+    normalize_jacobian: Column-norm depth weighting for Jacobian
 """
 
 import jax
@@ -108,3 +109,28 @@ def compute_jacobian_mua(mesh, mua, musp, srcpos, detpos,
             rows.append(row)
 
     return jnp.stack(rows, axis=0)
+
+
+def normalize_jacobian(J):
+    """Column-normalize Jacobian for depth-weighted reconstruction.
+
+    Divides each column by its L2 norm to compensate the surface bias
+    inherent in DOT sensitivity. Deeper nodes have smaller Jacobian
+    columns; normalization equalizes their contribution to the inversion.
+
+    After reconstruction with J_norm, scale back via:
+        delta_mua_true = delta_mua_norm / col_norms
+
+    Parameters
+    ----------
+    J : (n_meas, n_nodes) — raw Jacobian matrix.
+
+    Returns
+    -------
+    J_norm : (n_meas, n_nodes) — column-normalized Jacobian.
+    col_norms : (n_nodes,) — original column L2 norms.
+    """
+    col_norms = jnp.linalg.norm(J, axis=0)
+    safe_norms = jnp.where(col_norms > 1e-30, col_norms, 1.0)
+    J_norm = J / safe_norms[None, :]
+    return J_norm, col_norms

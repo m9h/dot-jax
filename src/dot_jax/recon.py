@@ -16,6 +16,7 @@ References
 
 Functions:
     reconstruct_mua: Linearised mua reconstruction from perturbation data
+    reconstruct_image: Single-shot reconstruction with depth weighting + L-curve
     solve_dual: Dual-formulation regularised solve (Kernel/Holoscan style)
     compute_lcurve: L-curve for regularization parameter selection
     select_lambda_lcurve: Optimal lambda at L-curve corner
@@ -98,6 +99,68 @@ def reconstruct_mua(mesh, data, srcpos, detpos, mua0, musp,
         musp=jnp.full(nn, musp),
         residuals=jnp.array(residuals),
     )
+
+
+def reconstruct_image(J, data, depth_weight=True, reg_method="lcurve",
+                      reg_param=None):
+    """Single-shot image reconstruction with depth weighting and regularization.
+
+    Combines column-norm Jacobian normalization (depth weighting) with
+    automatic regularization parameter selection (L-curve or GCV).
+
+    Pipeline:
+        1. Optionally normalize J columns (depth weighting)
+        2. Select lambda via L-curve, GCV, or fixed value
+        3. Solve (J^T J + lambda I)^{-1} J^T data
+        4. Un-normalize if depth weighting was applied
+
+    Parameters
+    ----------
+    J : (n_meas, n_nodes) — Jacobian/sensitivity matrix.
+    data : (n_meas,) — measurement perturbation vector.
+    depth_weight : bool — apply column-norm depth weighting.
+    reg_method : str — 'lcurve', 'gcv', or 'fixed'.
+    reg_param : float, optional — fixed lambda (required if reg_method='fixed').
+
+    Returns
+    -------
+    delta_x : (n_nodes,) — reconstructed parameter perturbation.
+    """
+    from .spectral import normalize_jacobian
+
+    if depth_weight:
+        J_work, col_norms = normalize_jacobian(J)
+    else:
+        J_work = J
+        col_norms = None
+
+    if reg_method == "lcurve":
+        # Use a lambda range scaled to the Jacobian's spectral norm
+        # instead of the SVD-based default which fails on normalized J
+        jtj_norm = jnp.linalg.norm(J_work.T @ J_work)
+        lambdas = jnp.logspace(-6, 0, 50) * jtj_norm
+        lam = select_lambda_lcurve(J_work, data, lambdas=lambdas)
+    elif reg_method == "gcv":
+        jtj_norm = jnp.linalg.norm(J_work.T @ J_work)
+        lambdas = jnp.logspace(-6, 0, 50) * jtj_norm
+        lam = select_lambda_gcv(J_work, data, lambdas=lambdas)
+    elif reg_method == "fixed":
+        if reg_param is None:
+            raise ValueError("reg_param required when reg_method='fixed'")
+        lam = float(reg_param)
+    else:
+        raise ValueError(f"Unknown reg_method: {reg_method}")
+
+    nn = J_work.shape[1]
+    JtJ = J_work.T @ J_work
+    x_norm = jnp.linalg.solve(JtJ + lam * jnp.eye(nn), J_work.T @ data)
+
+    if depth_weight:
+        # Clamp: don't amplify nodes with <1% of max sensitivity
+        max_norm = jnp.max(col_norms)
+        clamped = jnp.where(col_norms > 0.01 * max_norm, col_norms, 0.01 * max_norm)
+        return x_norm / clamped
+    return x_norm
 
 
 def solve_dual(J, data, reg=0.01):
