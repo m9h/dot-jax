@@ -1,2 +1,8 @@
 - [Use uv](feedback_uv.md) — prefer uv over pip for all Python package management
 - [Red-green TDD](feedback_red_green.md) — write failing tests first, then implement
+- [User profile](user_morgan.md) — Morgan Hough, neuroimaging researcher, JAX ecosystem
+- [dot-jax project state](project_dot_jax.md) — 325+ tests, 15 modules, data, demos, hackathon prep
+- [NeuroJSON resources](reference_neurojson.md) — head meshes, optical properties, fNIRS datasets from neurojson.io
+- [Head model survey](reference_head_models.md) — all standard head models prioritized for dot-jax
+- [SCI Head Model](reference_sci_head_model.md) — Utah multimodal model: T1/T2/DWI/fMRI/EEG + 8-layer tet mesh
+- [Kernel/Holoscan](reference_kernel_holoscan.md) — Kernel Flow 2 + NVIDIA Holoscan BCI pipeline architecture
