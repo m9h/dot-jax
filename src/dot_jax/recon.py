@@ -106,24 +106,27 @@ def reconstruct_mua(mesh, data, srcpos, detpos, mua0, musp,
     )
 
 
-def reconstruct_image(J, data, depth_weight=True, reg_method="lcurve",
-                      reg_param=None):
+def reconstruct_image(J, data, depth_weight=True, depth_power=0.5,
+                      reg_method="lcurve", reg_param=None):
     """Single-shot image reconstruction with depth weighting and regularization.
 
     Combines column-norm Jacobian normalization (depth weighting) with
     automatic regularization parameter selection (L-curve or GCV).
 
     Pipeline:
-        1. Optionally normalize J columns (depth weighting)
+        1. Optionally apply depth weighting via column-norm^p scaling
         2. Select lambda via L-curve, GCV, or fixed value
         3. Solve (J^T J + lambda I)^{-1} J^T data
-        4. Un-normalize if depth weighting was applied
+        4. Un-weight if depth weighting was applied
 
     Parameters
     ----------
     J : (n_meas, n_nodes) — Jacobian/sensitivity matrix.
     data : (n_meas,) — measurement perturbation vector.
     depth_weight : bool — apply column-norm depth weighting.
+    depth_power : float — exponent for depth compensation (0–1).
+        0 = no compensation, 0.5 = standard (Dehghani et al. 2009),
+        1 = full column normalization. Default 0.5.
     reg_method : str — 'lcurve', 'gcv', or 'fixed'.
     reg_param : float, optional — fixed lambda (required if reg_method='fixed').
 
@@ -134,10 +137,18 @@ def reconstruct_image(J, data, depth_weight=True, reg_method="lcurve",
     from .spectral import normalize_jacobian
 
     if depth_weight:
-        J_work, col_norms = normalize_jacobian(J)
+        _, col_norms = normalize_jacobian(J)
+        # Partial depth compensation: scale columns by col_norms^p
+        # p=0.5 is standard in DOT (balances depth sensitivity without
+        # over-amplifying insensitive boundary/deep nodes).
+        max_norm = jnp.max(col_norms)
+        clamped = jnp.where(col_norms > 0.01 * max_norm,
+                            col_norms, 0.01 * max_norm)
+        weight = clamped ** depth_power
+        J_work = J / weight[None, :]
     else:
         J_work = J
-        col_norms = None
+        weight = None
 
     if reg_method == "lcurve":
         # Use a lambda range scaled to the Jacobian's spectral norm
@@ -158,14 +169,11 @@ def reconstruct_image(J, data, depth_weight=True, reg_method="lcurve",
 
     nn = J_work.shape[1]
     JtJ = J_work.T @ J_work
-    x_norm = jnp.linalg.solve(JtJ + lam * jnp.eye(nn), J_work.T @ data)
+    x_weighted = jnp.linalg.solve(JtJ + lam * jnp.eye(nn), J_work.T @ data)
 
     if depth_weight:
-        # Clamp: don't amplify nodes with <1% of max sensitivity
-        max_norm = jnp.max(col_norms)
-        clamped = jnp.where(col_norms > 0.01 * max_norm, col_norms, 0.01 * max_norm)
-        return x_norm / clamped
-    return x_norm
+        return x_weighted / weight
+    return x_weighted
 
 
 def solve_dual(J, data, reg=0.01):

@@ -76,6 +76,17 @@ class FEMMesh(eqx.Module):
         elem_np = np.asarray(elem)
         node_np = np.asarray(node)
         elem_np = reorient_elems(node_np, elem_np)
+
+        # Filter degenerate (zero-volume) elements.  These arise from
+        # Delaunay tetrahedralization of structured grids and cause
+        # division by zero in deldotdel (1/(6*V)).
+        n0 = node_np[elem_np[:, 0]]
+        v1 = node_np[elem_np[:, 1]] - n0
+        v2 = node_np[elem_np[:, 2]] - n0
+        v3 = node_np[elem_np[:, 3]] - n0
+        vol = np.abs(np.sum(np.cross(v1, v2) * v3, axis=1)) / 6.0
+        elem_np = elem_np[vol > 1e-12]
+
         elem = jnp.asarray(elem_np, dtype=jnp.int32)
 
         if face is None:
