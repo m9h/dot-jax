@@ -404,3 +404,61 @@ def regress_short_channels(data, short_mask):
     data_np[:, short_mask_np] = 0.0
 
     return jnp.array(data_np)
+
+
+def regress_global_mean(data):
+    """Regress out the spatial mean from each channel.
+
+    The global mean captures systemic physiology (cardiac, respiratory,
+    Mayer waves) that is shared across all channels. Removing it reveals
+    focal neural signals. Essential when short channels are unavailable.
+
+    Parameters
+    ----------
+    data : (n_time, n_channels) — time series (OD or concentration).
+
+    Returns
+    -------
+    corrected : (n_time, n_channels) — data with global mean removed.
+    """
+    data_np = np.array(np.asarray(data), copy=True, dtype=np.float64)
+    global_mean = data_np.mean(axis=1)  # (n_time,)
+    reg = global_mean - global_mean.mean()
+    reg_var = np.dot(reg, reg)
+
+    if reg_var < 1e-30:
+        return jnp.array(data_np)
+
+    for ch in range(data_np.shape[1]):
+        y = data_np[:, ch]
+        beta = np.dot(y - y.mean(), reg) / reg_var
+        data_np[:, ch] = y - beta * global_mean
+
+    return jnp.array(data_np)
+
+
+def pca_filter(data, n_components=3):
+    """Remove the top N principal components from the data.
+
+    The leading PCs of multi-channel fNIRS data capture global
+    physiological fluctuations (cardiac, respiratory, Mayer waves).
+    Removing them enhances focal neural signals.
+
+    Parameters
+    ----------
+    data : (n_time, n_channels) — time series.
+    n_components : int — number of PCs to remove.
+
+    Returns
+    -------
+    cleaned : (n_time, n_channels) — data with top PCs removed.
+    """
+    data_np = np.array(np.asarray(data), dtype=np.float64)
+    mean = data_np.mean(axis=0, keepdims=True)
+    centered = data_np - mean
+
+    U, S, Vt = np.linalg.svd(centered, full_matrices=False)
+    recon = U[:, :n_components] @ np.diag(S[:n_components]) @ Vt[:n_components, :]
+    cleaned = data_np - recon
+
+    return jnp.array(cleaned)
