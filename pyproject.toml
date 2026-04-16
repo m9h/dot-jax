@@ -67,3 +67,11 @@ branch = true
 
 [tool.coverage.report]
 show_missing = true
+
+[tool.uv.sources]
+vpjax = { path = "../vpjax" }
+
+[dependency-groups]
+dev = [
+    "vpjax",
+]
