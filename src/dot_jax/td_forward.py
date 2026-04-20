@@ -207,3 +207,112 @@ def dtof_moments(dtof, times):
     m2 = jnp.sum(dtof * (times[:, None] - m1[None, :]) ** 2 * dt[:, None], axis=0) / jnp.maximum(m0, 1e-30)
 
     return m0, m1, m2
+
+
+def compute_moment_jacobian(mesh, mua, musp, srcpos, detpos,
+                            n_in=1.37, n_out=1.0,
+                            pulse_fwhm=100e-12, t_max=5e-9, n_times=200):
+    """Compute Jacobian of DTOF moments w.r.t. nodal absorption.
+
+    Uses JAX autodiff through the entire TD pipeline:
+        per-node mua → assembly → ODE solve → DTOF → moments
+
+    The Jacobian rows are [d(m0)/d(mua), d(m1)/d(mua), d(m2)/d(mua)]
+    stacked for each detector.
+
+    Parameters
+    ----------
+    mesh : FEMMesh
+    mua : float — baseline absorption coefficient.
+    musp : float — baseline reduced scattering coefficient.
+    srcpos : (n_src, 3) — source positions (first source used).
+    detpos : (n_det, 3) — detector positions.
+    n_in, n_out : float — refractive indices.
+    pulse_fwhm : float — laser pulse FWHM (seconds).
+    t_max : float — simulation time (seconds).
+    n_times : int — output timepoints.
+
+    Returns
+    -------
+    J : (3 * n_det, nn) — Jacobian matrix.
+        Rows ordered: [m0_det0, ..., m0_detN, m1_det0, ..., m2_detN].
+    """
+    nn = mesh.nn
+    n_det = detpos.shape[0]
+
+    # Assemble pieces that don't depend on mua (geometry-only)
+    rhs_src = assemble_rhs(mesh, srcpos)
+    rhs_det = assemble_rhs(mesh, detpos)
+    b = rhs_src[:, 0]  # first source
+    Mt = assemble_mass_time(mesh, n_in)
+    sigma = pulse_fwhm / 2.3548200450309493
+    ts = jnp.linspace(0, t_max, n_times)
+
+    def moments_from_nodal_mua(mua_nodal):
+        """Full TD pipeline: nodal mua → moments (differentiable)."""
+        # Convert per-node → per-element (mean of 4 vertices)
+        mua_elem = jnp.mean(mua_nodal[mesh.elem], axis=1)
+        A = assemble_system_cw(mesh, mua_elem, musp, n_in, n_out)
+        Mt_inv_A = jnp.linalg.solve(Mt, A)
+        Mt_inv_b = jnp.linalg.solve(Mt, b)
+
+        def vector_field(t, y, args):
+            pulse = jnp.exp(-0.5 * (t / sigma) ** 2) / (sigma * jnp.sqrt(2 * jnp.pi))
+            return -Mt_inv_A @ y + Mt_inv_b * pulse
+
+        sol = diffrax.diffeqsolve(
+            diffrax.ODETerm(vector_field),
+            diffrax.Tsit5(),
+            t0=0.0, t1=t_max,
+            dt0=pulse_fwhm / 10,
+            y0=jnp.zeros(nn),
+            saveat=diffrax.SaveAt(ts=ts),
+            max_steps=16384,
+        )
+        phi_t = sol.ys  # (n_times, nn)
+        dtof = phi_t @ rhs_det  # (n_times, n_det)
+        m0, m1, m2 = dtof_moments(dtof, ts)
+        return jnp.concatenate([m0, m1, m2])  # (3 * n_det,)
+
+    # Compute Jacobian via reverse-mode autodiff
+    mua_bg = jnp.full(nn, mua)
+    J = jax.jacrev(moments_from_nodal_mua)(mua_bg)  # (3*n_det, nn)
+
+    return J
+
+
+def reconstruct_td(mesh, delta_moments, srcpos, detpos,
+                   mua0, musp, n_in=1.37, n_out=1.0,
+                   pulse_fwhm=100e-12, t_max=5e-9, n_times=200,
+                   reg_param=1e-4):
+    """Reconstruct nodal absorption perturbation from TD moment changes.
+
+    Linearised reconstruction using the moment Jacobian:
+        delta_mua = (J^T J + lambda I)^{-1} J^T delta_moments
+
+    Parameters
+    ----------
+    mesh : FEMMesh
+    delta_moments : (3 * n_det,) — moment perturbations [dm0, dm1, dm2].
+    srcpos, detpos : source/detector positions.
+    mua0 : float — background absorption for Jacobian linearisation.
+    musp : float — reduced scattering (fixed).
+    n_in, n_out : float — refractive indices.
+    pulse_fwhm, t_max, n_times : TD parameters.
+    reg_param : float — Tikhonov regularisation.
+
+    Returns
+    -------
+    delta_mua : (nn,) — reconstructed nodal absorption perturbation.
+    """
+    J = compute_moment_jacobian(
+        mesh, mua0, musp, srcpos, detpos, n_in, n_out,
+        pulse_fwhm, t_max, n_times,
+    )
+
+    nn = J.shape[1]
+    JtJ = J.T @ J
+    Jtd = J.T @ delta_moments
+    delta_mua = jnp.linalg.solve(JtJ + reg_param * jnp.eye(nn), Jtd)
+
+    return delta_mua
