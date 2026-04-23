@@ -206,6 +206,133 @@ class TestLoadBidsNirs:
 
 
 # ---------------------------------------------------------------------------
+# Time-domain moment SNIRF reader
+# ---------------------------------------------------------------------------
+
+import h5py
+
+from dot_jax.io import snirf_td_moments
+
+
+def _write_td_moment_snirf(path, n_time=10, n_src=2, n_det=2,
+                           wavelengths=(690.0, 905.0),
+                           moment_orders=(0, 1, 2)):
+    """Write a minimal SNIRF v1.1 file with dataType==201 TD-moment channels.
+
+    Each (src, det, wavelength) triple has one channel per moment order,
+    matching the Kernel Flow 2 TD-fNIRS export convention.
+    """
+    with h5py.File(path, "w") as f:
+        nirs = f.create_group("nirs1")
+        probe = nirs.create_group("probe")
+        src_pos = np.tile(np.arange(n_src, dtype=np.float64)[:, None], (1, 3)) * 10.0
+        det_pos = np.tile(np.arange(n_det, dtype=np.float64)[:, None], (1, 3)) * 10.0 + 20.0
+        probe.create_dataset("sourcePos3D", data=src_pos)
+        probe.create_dataset("detectorPos3D", data=det_pos)
+        probe.create_dataset("wavelengths", data=np.asarray(wavelengths, dtype=np.float64))
+
+        data_grp = nirs.create_group("data1")
+        channels = []
+        for s in range(n_src):
+            for d in range(n_det):
+                for w in range(len(wavelengths)):
+                    for o in moment_orders:
+                        channels.append((s + 1, d + 1, w + 1, 201, o + 1))
+        n_ch = len(channels)
+        rng = np.random.default_rng(0)
+        ts = rng.standard_normal((n_time, n_ch)).astype(np.float64)
+        data_grp.create_dataset("dataTimeSeries", data=ts)
+
+        for i, (s, d, w, dt, di) in enumerate(channels, start=1):
+            ml = data_grp.create_group(f"measurementList{i}")
+            ml.create_dataset("sourceIndex", data=np.int32(s))
+            ml.create_dataset("detectorIndex", data=np.int32(d))
+            ml.create_dataset("wavelengthIndex", data=np.int32(w))
+            ml.create_dataset("dataType", data=np.int32(dt))
+            ml.create_dataset("dataTypeIndex", data=np.int32(di))
+
+    return n_ch
+
+
+class TestSnirfTdMoments:
+    """Extract TD moments (dataType == 201) from a SNIRF file."""
+
+    def test_basic_shape(self, tmp_path):
+        path = tmp_path / "td.snirf"
+        _write_td_moment_snirf(path, n_time=8, n_src=2, n_det=2,
+                               wavelengths=(690.0, 905.0),
+                               moment_orders=(0, 1, 2))
+
+        snirf = read_snirf(path)
+        out = snirf_td_moments(snirf, moment_orders=(0, 1, 2))
+        # 2 src × 2 det × 2 wl = 8 channels, 3 moment orders.
+        assert out["moments"].shape == (8, 8, 3)
+        assert out["channel_src"].shape == (8,)
+        assert out["channel_det"].shape == (8,)
+        assert out["channel_wl"].shape == (8,)
+
+    def test_zero_based_indices(self, tmp_path):
+        path = tmp_path / "td.snirf"
+        _write_td_moment_snirf(path)
+
+        snirf = read_snirf(path)
+        out = snirf_td_moments(snirf)
+        # Writer uses 1-based SNIRF indices; reader should expose 0-based.
+        assert int(jnp.min(out["channel_src"])) == 0
+        assert int(jnp.min(out["channel_det"])) == 0
+
+    def test_wavelength_values(self, tmp_path):
+        path = tmp_path / "td.snirf"
+        _write_td_moment_snirf(path, wavelengths=(690.0, 905.0))
+
+        snirf = read_snirf(path)
+        out = snirf_td_moments(snirf)
+        unique_wl = jnp.unique(out["channel_wl"])
+        npt.assert_array_equal(np.sort(np.array(unique_wl)), np.array([690.0, 905.0]))
+
+    def test_moment_ordering(self, tmp_path):
+        """Requesting (0, 2) should place m0 on axis index 0 and m2 on index 1."""
+        path = tmp_path / "td.snirf"
+        _write_td_moment_snirf(path, moment_orders=(0, 1, 2))
+
+        snirf = read_snirf(path)
+        out = snirf_td_moments(snirf, moment_orders=(0, 2))
+        assert out["moments"].shape[-1] == 2
+        assert out["moment_orders"] == (0, 2)
+
+    def test_rejects_cw_file(self, tmp_path):
+        """Files without TD-moment channels should raise."""
+        path = tmp_path / "cw.snirf"
+        with h5py.File(path, "w") as f:
+            nirs = f.create_group("nirs1")
+            probe = nirs.create_group("probe")
+            probe.create_dataset("sourcePos3D", data=np.zeros((1, 3)))
+            probe.create_dataset("detectorPos3D", data=np.zeros((1, 3)))
+            probe.create_dataset("wavelengths", data=np.array([690.0]))
+            dg = nirs.create_group("data1")
+            dg.create_dataset("dataTimeSeries", data=np.zeros((5, 1)))
+            ml = dg.create_group("measurementList1")
+            ml.create_dataset("sourceIndex", data=np.int32(1))
+            ml.create_dataset("detectorIndex", data=np.int32(1))
+            ml.create_dataset("wavelengthIndex", data=np.int32(1))
+            ml.create_dataset("dataType", data=np.int32(1))  # CW, not 201.
+
+        snirf = read_snirf(path)
+        with pytest.raises(ValueError, match="no TD-moment channels"):
+            snirf_td_moments(snirf)
+
+    def test_incomplete_moments_raise(self, tmp_path):
+        """If some (src, det, wl) triple is missing a requested moment order,
+        the reader must flag it rather than silently returning NaNs."""
+        path = tmp_path / "td_partial.snirf"
+        _write_td_moment_snirf(path, moment_orders=(0, 1))  # file only has m0, m1
+
+        snirf = read_snirf(path)
+        with pytest.raises(ValueError, match="incomplete"):
+            snirf_td_moments(snirf, moment_orders=(0, 1, 2))  # ask for m2 too
+
+
+# ---------------------------------------------------------------------------
 # JMesh / NeuroJSON
 # ---------------------------------------------------------------------------
 

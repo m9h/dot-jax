@@ -98,6 +98,105 @@ def td_source_pulse(t, fwhm=100e-12):
     return pulse / norm
 
 
+def _solve_td_multi_source(mesh, mua, musp, b_all, n_in, n_out,
+                           pulse_fwhm, t_max, n_times):
+    """Solve the TD diffusion ODE for many sources, sharing A assembly.
+
+    The expensive pieces — FEM system assembly and the Mt^{-1} A solve —
+    do not depend on the source, so they are computed once and reused
+    across all sources via vmap.
+
+    Parameters
+    ----------
+    mesh : FEMMesh
+    mua : float or (ne,) — absorption.
+    musp : float or (ne,) — reduced scattering.
+    b_all : (n_src, nn) — stacked RHS vectors, one per source.
+    n_in, n_out : float — refractive indices.
+    pulse_fwhm, t_max, n_times : TD config.
+
+    Returns
+    -------
+    phi_t_all : (n_src, n_times, nn) — fluence field per source and time.
+    ts : (n_times,) — output time samples.
+    """
+    A = assemble_system_cw(mesh, mua, musp, n_in, n_out)
+    Mt = assemble_mass_time(mesh, n_in)
+    Mt_inv_A = jnp.linalg.solve(Mt, A)                   # (nn, nn), shared.
+    Mt_inv_b_all = jnp.linalg.solve(Mt, b_all.T).T       # (n_src, nn).
+
+    sigma = pulse_fwhm / 2.3548200450309493
+    ts = jnp.linspace(0, t_max, n_times)
+
+    def solve_one(Mt_inv_b):
+        def vector_field(t, y, args):
+            pulse = jnp.exp(-0.5 * (t / sigma) ** 2) / (sigma * jnp.sqrt(2 * jnp.pi))
+            return -Mt_inv_A @ y + Mt_inv_b * pulse
+        sol = diffrax.diffeqsolve(
+            diffrax.ODETerm(vector_field),
+            diffrax.Tsit5(),
+            t0=0.0, t1=t_max,
+            dt0=pulse_fwhm / 10,
+            y0=jnp.zeros(mesh.nn),
+            saveat=diffrax.SaveAt(ts=ts),
+            max_steps=16384,
+        )
+        return sol.ys
+
+    phi_t_all = jax.vmap(solve_one)(Mt_inv_b_all)
+    return phi_t_all, ts
+
+
+def _solve_td_ode(mesh, mua, musp, b, n_in, n_out,
+                  pulse_fwhm, t_max, n_times):
+    """Solve the TD diffusion ODE for a single source injection.
+
+    Solves  M_t dPhi/dt = -A Phi + b * pulse(t)  on (0, t_max) by
+    pre-multiplying with M_t^{-1} and integrating the resulting
+    explicit ODE with Diffrax's Tsit5 adaptive RK method.
+
+    Parameters
+    ----------
+    mesh : FEMMesh
+    mua : float or (ne,) — absorption (per-element or scalar).
+    musp : float or (ne,) — reduced scattering (per-element or scalar).
+    b : (nn,) — RHS vector for this source.
+    n_in, n_out : float — refractive indices.
+    pulse_fwhm, t_max, n_times : TD config.
+
+    Returns
+    -------
+    phi_t : (n_times, nn) — fluence field at each time sample.
+    ts : (n_times,) — output time samples.
+    """
+    A = assemble_system_cw(mesh, mua, musp, n_in, n_out)
+    Mt = assemble_mass_time(mesh, n_in)
+
+    # Pre-multiply by M_t^{-1} to get explicit form dPhi/dt = -M_t^{-1}A Phi + M_t^{-1}b p(t).
+    # Avoids solving a linear system at every RK step.
+    Mt_inv_A = jnp.linalg.solve(Mt, A)
+    Mt_inv_b = jnp.linalg.solve(Mt, b)
+
+    sigma = pulse_fwhm / 2.3548200450309493
+
+    def vector_field(t, y, args):
+        pulse = jnp.exp(-0.5 * (t / sigma) ** 2) / (sigma * jnp.sqrt(2 * jnp.pi))
+        return -Mt_inv_A @ y + Mt_inv_b * pulse
+
+    ts = jnp.linspace(0, t_max, n_times)
+    sol = diffrax.diffeqsolve(
+        diffrax.ODETerm(vector_field),
+        diffrax.Tsit5(),
+        t0=0.0,
+        t1=t_max,
+        dt0=pulse_fwhm / 10,
+        y0=jnp.zeros(mesh.nn),
+        saveat=diffrax.SaveAt(ts=ts),
+        max_steps=16384,
+    )
+    return sol.ys, ts
+
+
 def td_forward_cw(mesh, mua, musp, srcpos, detpos,
                    n_in=1.37, n_out=1.0,
                    pulse_fwhm=100e-12, t_max=5e-9, n_times=200):
@@ -111,8 +210,8 @@ def td_forward_cw(mesh, mua, musp, srcpos, detpos,
     Parameters
     ----------
     mesh : FEMMesh
-    mua : float — absorption coefficient (1/mm).
-    musp : float — reduced scattering coefficient (1/mm).
+    mua : float or (ne,) — absorption coefficient (1/mm).
+    musp : float or (ne,) — reduced scattering coefficient (1/mm).
     srcpos : (n_src, 3) — source positions (first source used).
     detpos : (n_det, 3) — detector positions.
     n_in : float — tissue refractive index.
@@ -128,50 +227,16 @@ def td_forward_cw(mesh, mua, musp, srcpos, detpos,
         times : (n_times,) — time points.
         phi_t : (n_times, nn) — fluence field over time.
     """
-    # Assemble spatial operators
-    A = assemble_system_cw(mesh, mua, musp, n_in, n_out)
-    Mt = assemble_mass_time(mesh, n_in)
-
-    # Source and detector vectors
     rhs_src = assemble_rhs(mesh, srcpos)
     rhs_det = assemble_rhs(mesh, detpos)
     b = rhs_src[:, 0]  # first source
 
-    # Pre-multiply by M_t^{-1} to convert the ODE to explicit form:
-    #   dPhi/dt = -M_t^{-1} A Phi + M_t^{-1} b * pulse(t)
-    # This avoids solving a linear system at every RK step.
-    Mt_inv_A = jnp.linalg.solve(Mt, A)
-    Mt_inv_b = jnp.linalg.solve(Mt, b)
-
-    # Gaussian pulse sigma (FWHM = 2*sqrt(2*ln2)*sigma).
-    sigma = pulse_fwhm / 2.3548200450309493
-
-    def vector_field(t, y, args):
-        # Normalised Gaussian laser pulse at time t.
-        pulse = jnp.exp(-0.5 * (t / sigma) ** 2) / (sigma * jnp.sqrt(2 * jnp.pi))
-        # ODE right-hand side: diffusion/absorption decay + source injection.
-        return -Mt_inv_A @ y + Mt_inv_b * pulse
-
-    # Uniformly spaced output time points.
-    ts = jnp.linspace(0, t_max, n_times)
-
-    # Solve with Diffrax Tsit5 (5th-order Runge-Kutta with adaptive stepping).
-    # The initial step size is 1/10 of the pulse FWHM to resolve the source.
-    sol = diffrax.diffeqsolve(
-        diffrax.ODETerm(vector_field),
-        diffrax.Tsit5(),
-        t0=0.0,
-        t1=t_max,
-        dt0=pulse_fwhm / 10,
-        y0=jnp.zeros(mesh.nn),
-        saveat=diffrax.SaveAt(ts=ts),
-        max_steps=16384,
+    phi_t, ts = _solve_td_ode(
+        mesh, mua, musp, b, n_in, n_out,
+        pulse_fwhm, t_max, n_times,
     )
 
-    phi_t = sol.ys  # (n_times, nn)
-
-    # Project the full-field fluence onto detector positions to get the
-    # Distribution of Time-of-Flight (DTOF) at each detector.
+    # Project fluence onto detector positions.
     dtof = phi_t @ rhs_det  # (n_times, n_det)
 
     return TDForwardResult(dtof=dtof, times=ts, phi_t=phi_t)
@@ -211,22 +276,29 @@ def dtof_moments(dtof, times):
 
 def compute_moment_jacobian(mesh, mua, musp, srcpos, detpos,
                             n_in=1.37, n_out=1.0,
-                            pulse_fwhm=100e-12, t_max=5e-9, n_times=200):
+                            pulse_fwhm=100e-12, t_max=5e-9, n_times=200,
+                            *, channel_pairs=None):
     """Compute Jacobian of DTOF moments w.r.t. nodal absorption.
 
     Uses JAX autodiff through the entire TD pipeline:
         per-node mua → assembly → ODE solve → DTOF → moments
 
-    The Jacobian rows are [d(m0)/d(mua), d(m1)/d(mua), d(m2)/d(mua)]
-    stacked for each detector.
+    Supports multiple sources, sharing the FEM assembly and Mt^{-1} A
+    solve across sources via vmap. The Jacobian rows are
+    ``[d(m0)/d(mua); d(m1)/d(mua); d(m2)/d(mua)]`` concatenated in that
+    moment order, each spanning all channels.
 
     Parameters
     ----------
     mesh : FEMMesh
     mua : float — baseline absorption coefficient.
     musp : float — baseline reduced scattering coefficient.
-    srcpos : (n_src, 3) — source positions (first source used).
+    srcpos : (n_src, 3) — source positions.
     detpos : (n_det, 3) — detector positions.
+    channel_pairs : (n_ch, 2) int array, optional
+        Explicit (src_idx, det_idx) pairs to include, matching an SNIRF
+        measurement list. When omitted, the full Cartesian product of
+        sources and detectors is used, yielding ``n_src * n_det`` channels.
     n_in, n_out : float — refractive indices.
     pulse_fwhm : float — laser pulse FWHM (seconds).
     t_max : float — simulation time (seconds).
@@ -234,72 +306,75 @@ def compute_moment_jacobian(mesh, mua, musp, srcpos, detpos,
 
     Returns
     -------
-    J : (3 * n_det, nn) — Jacobian matrix.
-        Rows ordered: [m0_det0, ..., m0_detN, m1_det0, ..., m2_detN].
+    J : (3 * n_ch, nn) — Jacobian matrix.
+        Rows ordered ``[m0 (all channels); m1 (all channels); m2 (all channels)]``,
+        where channel indexing follows ``channel_pairs`` when given, or
+        row-major enumeration of (src, det) pairs otherwise.
     """
     nn = mesh.nn
+    n_src = srcpos.shape[0]
     n_det = detpos.shape[0]
 
-    # Assemble pieces that don't depend on mua (geometry-only)
-    rhs_src = assemble_rhs(mesh, srcpos)
-    rhs_det = assemble_rhs(mesh, detpos)
-    b = rhs_src[:, 0]  # first source
-    Mt = assemble_mass_time(mesh, n_in)
-    sigma = pulse_fwhm / 2.3548200450309493
-    ts = jnp.linspace(0, t_max, n_times)
+    # Geometry-only pieces: invariant under mua.
+    rhs_src = assemble_rhs(mesh, srcpos)    # (nn, n_src)
+    rhs_det = assemble_rhs(mesh, detpos)    # (nn, n_det)
+    b_all = rhs_src.T                       # (n_src, nn)
+
+    if channel_pairs is not None:
+        channel_pairs = jnp.asarray(channel_pairs, dtype=jnp.int32)
+        src_sel = channel_pairs[:, 0]
+        det_sel = channel_pairs[:, 1]
 
     def moments_from_nodal_mua(mua_nodal):
         """Full TD pipeline: nodal mua → moments (differentiable)."""
-        # Convert per-node → per-element (mean of 4 vertices)
         mua_elem = jnp.mean(mua_nodal[mesh.elem], axis=1)
-        A = assemble_system_cw(mesh, mua_elem, musp, n_in, n_out)
-        Mt_inv_A = jnp.linalg.solve(Mt, A)
-        Mt_inv_b = jnp.linalg.solve(Mt, b)
+        phi_t_all, ts = _solve_td_multi_source(
+            mesh, mua_elem, musp, b_all, n_in, n_out,
+            pulse_fwhm, t_max, n_times,
+        )  # (n_src, n_times, nn)
+        # Project each source's field onto all detectors: dtof[s, t, d].
+        dtof_all = jnp.einsum('stn,nd->std', phi_t_all, rhs_det)
 
-        def vector_field(t, y, args):
-            pulse = jnp.exp(-0.5 * (t / sigma) ** 2) / (sigma * jnp.sqrt(2 * jnp.pi))
-            return -Mt_inv_A @ y + Mt_inv_b * pulse
+        if channel_pairs is None:
+            # All (src, det) pairs, row-major in src then det:
+            # dtof_ch[:, s*n_det + d] = dtof_all[s, :, d].
+            dtof_ch = dtof_all.transpose(1, 0, 2).reshape(n_times, n_src * n_det)
+        else:
+            # Gather the requested (src, det) pairs.
+            dtof_ch = dtof_all[src_sel, :, det_sel].T  # (n_times, n_ch)
 
-        sol = diffrax.diffeqsolve(
-            diffrax.ODETerm(vector_field),
-            diffrax.Tsit5(),
-            t0=0.0, t1=t_max,
-            dt0=pulse_fwhm / 10,
-            y0=jnp.zeros(nn),
-            saveat=diffrax.SaveAt(ts=ts),
-            max_steps=16384,
-        )
-        phi_t = sol.ys  # (n_times, nn)
-        dtof = phi_t @ rhs_det  # (n_times, n_det)
-        m0, m1, m2 = dtof_moments(dtof, ts)
-        return jnp.concatenate([m0, m1, m2])  # (3 * n_det,)
+        m0, m1, m2 = dtof_moments(dtof_ch, ts)
+        return jnp.concatenate([m0, m1, m2])
 
-    # Compute Jacobian via reverse-mode autodiff
     mua_bg = jnp.full(nn, mua)
-    J = jax.jacrev(moments_from_nodal_mua)(mua_bg)  # (3*n_det, nn)
-
-    return J
+    return jax.jacrev(moments_from_nodal_mua)(mua_bg)
 
 
 def reconstruct_td(mesh, delta_moments, srcpos, detpos,
                    mua0, musp, n_in=1.37, n_out=1.0,
                    pulse_fwhm=100e-12, t_max=5e-9, n_times=200,
-                   reg_param=1e-4):
+                   reg_param=1e-4, *, channel_pairs=None):
     """Reconstruct nodal absorption perturbation from TD moment changes.
 
     Linearised reconstruction using the moment Jacobian:
         delta_mua = (J^T J + lambda I)^{-1} J^T delta_moments
 
+    Primal Tikhonov form. For underdetermined problems where ``nn >>
+    n_meas`` (atlas-scale meshes), prefer :func:`reconstruct_td_dual`.
+
     Parameters
     ----------
     mesh : FEMMesh
-    delta_moments : (3 * n_det,) — moment perturbations [dm0, dm1, dm2].
+    delta_moments : (3 * n_ch,) — moment perturbations [dm0, dm1, dm2].
     srcpos, detpos : source/detector positions.
     mua0 : float — background absorption for Jacobian linearisation.
     musp : float — reduced scattering (fixed).
     n_in, n_out : float — refractive indices.
     pulse_fwhm, t_max, n_times : TD parameters.
     reg_param : float — Tikhonov regularisation.
+    channel_pairs : (n_ch, 2) int, optional
+        Explicit (src_idx, det_idx) channel list, passed through to
+        :func:`compute_moment_jacobian`.
 
     Returns
     -------
@@ -308,6 +383,7 @@ def reconstruct_td(mesh, delta_moments, srcpos, detpos,
     J = compute_moment_jacobian(
         mesh, mua0, musp, srcpos, detpos, n_in, n_out,
         pulse_fwhm, t_max, n_times,
+        channel_pairs=channel_pairs,
     )
 
     nn = J.shape[1]
@@ -316,3 +392,43 @@ def reconstruct_td(mesh, delta_moments, srcpos, detpos,
     delta_mua = jnp.linalg.solve(JtJ + reg_param * jnp.eye(nn), Jtd)
 
     return delta_mua
+
+
+def reconstruct_td_dual(mesh, delta_moments, srcpos, detpos,
+                        mua0, musp, n_in=1.37, n_out=1.0,
+                        pulse_fwhm=100e-12, t_max=5e-9, n_times=200,
+                        reg_param=0.01, *, channel_pairs=None):
+    """Dual-formulation TD reconstruction for underdetermined problems.
+
+    Computes the moment Jacobian via autodiff, then solves
+        delta_mua = J^T (J J^T + lambda * sqrt(||J J^T||) * I)^{-1} delta_moments
+    using :func:`dot_jax.recon.solve_dual`. Efficient when the number of
+    mesh nodes greatly exceeds the number of channels — the matrix
+    inverted is ``(n_meas, n_meas)`` rather than ``(nn, nn)``. This is
+    the formulation used by the Kernel/Holoscan BCI pipeline at the
+    optical-property layer; here we apply it to TD moments.
+
+    Parameters
+    ----------
+    mesh : FEMMesh
+    delta_moments : (3 * n_ch,) — moment perturbations [dm0, dm1, dm2].
+    srcpos, detpos : source/detector positions.
+    mua0, musp, n_in, n_out, pulse_fwhm, t_max, n_times : forward
+        configuration (see :func:`compute_moment_jacobian`).
+    reg_param : float — relative Tikhonov regularisation (scaled by
+        ``sqrt(||J J^T||)`` inside ``solve_dual``).
+    channel_pairs : (n_ch, 2) int, optional
+        Explicit (src_idx, det_idx) channel list.
+
+    Returns
+    -------
+    delta_mua : (nn,) — reconstructed nodal absorption perturbation.
+    """
+    from .recon import solve_dual
+
+    J = compute_moment_jacobian(
+        mesh, mua0, musp, srcpos, detpos, n_in, n_out,
+        pulse_fwhm, t_max, n_times,
+        channel_pairs=channel_pairs,
+    )
+    return solve_dual(J, delta_moments, reg=reg_param)

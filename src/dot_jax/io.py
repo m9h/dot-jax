@@ -31,11 +31,26 @@ import numpy as np
 
 
 class MeasurementList(NamedTuple):
-    """Per-channel metadata from SNIRF measurementList."""
-    source_index: np.ndarray    # (n_chan,) 1-based source indices
-    detector_index: np.ndarray  # (n_chan,) 1-based detector indices
-    wavelength_index: np.ndarray  # (n_chan,) 1-based wavelength indices
-    data_type: np.ndarray       # (n_chan,) SNIRF data type codes
+    """Per-channel metadata from SNIRF measurementList.
+
+    SNIRF ``dataType`` codes of interest:
+
+    - ``1``   Continuous Wave (raw amplitude)
+    - ``51`` / ``52``  Frequency Domain (amplitude / phase)
+    - ``101`` Time Domain — Gated (each row is one photon-count gate)
+    - ``201`` Time Domain — Moments (each row is one moment order)
+    - ``99999`` Processed (e.g. HbO/HbR concentration)
+
+    For ``dataType == 201``, ``data_type_index`` gives the moment order
+    (1 = m0, 2 = m1, 3 = m2, …). For ``dataType == 101`` it selects a
+    gate in ``probe.timeDelay``. For ``dataType == 99999`` it selects the
+    processed-data label. For CW (``dataType == 1``) it is unused.
+    """
+    source_index: np.ndarray       # (n_chan,) 1-based source indices
+    detector_index: np.ndarray     # (n_chan,) 1-based detector indices
+    wavelength_index: np.ndarray   # (n_chan,) 1-based wavelength indices
+    data_type: np.ndarray          # (n_chan,) SNIRF data type codes
+    data_type_index: np.ndarray    # (n_chan,) dataType-specific secondary index
 
 
 class SnirfData(NamedTuple):
@@ -205,12 +220,14 @@ def _read_measurement_list(data_grp):
             detector_index=np.array([], dtype=np.int32),
             wavelength_index=np.array([], dtype=np.int32),
             data_type=np.array([], dtype=np.int32),
+            data_type_index=np.array([], dtype=np.int32),
         )
 
     src_idx = np.zeros(n_chan, dtype=np.int32)
     det_idx = np.zeros(n_chan, dtype=np.int32)
     wl_idx = np.zeros(n_chan, dtype=np.int32)
     dtype = np.ones(n_chan, dtype=np.int32)
+    dtype_idx = np.zeros(n_chan, dtype=np.int32)
 
     # Read sequentially by index (1-based per SNIRF spec)
     for i in range(n_chan):
@@ -221,12 +238,15 @@ def _read_measurement_list(data_grp):
         wl_idx[i] = int(ml["wavelengthIndex"][()])
         if "dataType" in ml:
             dtype[i] = int(ml["dataType"][()])
+        if "dataTypeIndex" in ml:
+            dtype_idx[i] = int(ml["dataTypeIndex"][()])
 
     return MeasurementList(
         source_index=src_idx,
         detector_index=det_idx,
         wavelength_index=wl_idx,
         data_type=dtype,
+        data_type_index=dtype_idx,
     )
 
 
@@ -387,6 +407,110 @@ def snirf_to_dot_jax(snirf_data, wavelength=None):
         "channel_det": jnp.array(det_idx, dtype=jnp.int32),
         "channel_wl": jnp.array(wl_per_chan, dtype=jnp.float64),
         "fs": snirf_data.sampling_frequency,
+    }
+
+
+# =============================================================================
+# SNIRF time-domain moment extractor
+# =============================================================================
+
+# SNIRF dataType codes.
+SNIRF_DATATYPE_CW = 1
+SNIRF_DATATYPE_TD_GATED = 101
+SNIRF_DATATYPE_TD_MOMENTS = 201
+
+
+def snirf_td_moments(snirf_data, *, moment_orders=(0, 1, 2)):
+    """Extract time-domain DTOF moments from a SNIRF file.
+
+    TD-fNIRS devices such as Kernel Flow 2 store moments with
+    ``dataType == 201``. Each SNIRF channel carries a single
+    ``(src, det, wavelength, moment_order)`` tuple; this function groups
+    them so downstream code can select e.g. "m0 at 690 nm" as one vector.
+
+    Parameters
+    ----------
+    snirf_data : SnirfData
+        Output of :func:`read_snirf` for a TD SNIRF file.
+    moment_orders : tuple of int, default ``(0, 1, 2)``
+        The SNIRF ``dataTypeIndex`` values to extract. Index 1 maps to
+        moment order 0 (total photon count), 2 → order 1 (mean time-of-
+        flight), 3 → order 2 (variance), matching the 1-based SNIRF
+        convention. Pass ``(0, 1, 2)`` for m0/m1/m2.
+
+    Returns
+    -------
+    dict with keys:
+        ``moments`` : (n_time, n_ch, n_moments) jnp.ndarray
+            Per-channel moment time series.
+        ``channel_src`` : (n_ch,) int — 0-based source index per channel.
+        ``channel_det`` : (n_ch,) int — 0-based detector index per channel.
+        ``channel_wl``  : (n_ch,) float — wavelength [nm] per channel.
+        ``moment_orders`` : tuple — the moment orders returned, in axis order.
+        ``srcpos``, ``detpos``, ``wavelengths`` — as in :func:`snirf_to_dot_jax`.
+
+    Raises
+    ------
+    ValueError
+        If the file has no TD-moment channels, or the requested moment
+        orders are not all present for the same (src, det, wavelength).
+    """
+    ml = snirf_data.measurement_list
+    td_mask = ml.data_type == SNIRF_DATATYPE_TD_MOMENTS
+    n_td = int(np.sum(td_mask))
+    if n_td == 0:
+        raise ValueError(
+            "SNIRF file contains no TD-moment channels "
+            f"(dataType == {SNIRF_DATATYPE_TD_MOMENTS})."
+        )
+
+    # Columns of dataTimeSeries corresponding to TD-moment channels.
+    td_cols = np.where(td_mask)[0]
+    src_idx = ml.source_index[td_cols] - 1
+    det_idx = ml.detector_index[td_cols] - 1
+    wl_idx = ml.wavelength_index[td_cols] - 1
+    # SNIRF dataTypeIndex is 1-based for moment order (1→m0, 2→m1, …).
+    # Translate to 0-based moment order.
+    ord_arr = ml.data_type_index[td_cols] - 1
+
+    # Group channels by (src, det, wl). Every such triple should have
+    # one entry per requested moment order.
+    keys = np.stack([src_idx, det_idx, wl_idx], axis=1)
+    # np.unique with axis=0 preserves a consistent ordering.
+    unique_keys, inverse = np.unique(keys, axis=0, return_inverse=True)
+    n_ch = unique_keys.shape[0]
+
+    n_time = snirf_data.data.shape[0]
+    n_moments = len(moment_orders)
+    out = np.full((n_time, n_ch, n_moments), np.nan, dtype=snirf_data.data.dtype)
+
+    order_to_axis = {int(o): k for k, o in enumerate(moment_orders)}
+    for j, col in enumerate(td_cols):
+        o = int(ord_arr[j])
+        if o not in order_to_axis:
+            continue  # moment order not requested
+        ch = int(inverse[j])
+        out[:, ch, order_to_axis[o]] = snirf_data.data[:, col]
+
+    if np.isnan(out).any():
+        missing = np.argwhere(np.isnan(out[0]))
+        sample = missing[0] if missing.size else None
+        raise ValueError(
+            "TD-moment channels are incomplete: not every (src, det, wl) "
+            f"triple has all moment orders {moment_orders}. "
+            f"First gap at channel={sample}." if sample is not None else ""
+        )
+
+    wl_array = np.asarray(snirf_data.wavelengths)
+    return {
+        "moments": jnp.asarray(out, dtype=jnp.float64),
+        "channel_src": jnp.asarray(unique_keys[:, 0], dtype=jnp.int32),
+        "channel_det": jnp.asarray(unique_keys[:, 1], dtype=jnp.int32),
+        "channel_wl": jnp.asarray(wl_array[unique_keys[:, 2]], dtype=jnp.float64),
+        "moment_orders": tuple(int(o) for o in moment_orders),
+        "srcpos": jnp.asarray(snirf_data.source_pos, dtype=jnp.float64),
+        "detpos": jnp.asarray(snirf_data.detector_pos, dtype=jnp.float64),
+        "wavelengths": jnp.asarray(wl_array, dtype=jnp.float64),
     }
 
 

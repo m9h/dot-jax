@@ -13,7 +13,8 @@ from .forward import forward_cw, forward_cw_sparse, locate_sources, assemble_rhs
 from .spectral import spectral_forward_cw, compute_jacobian_mua
 from .recon import reconstruct_mua
 from .io import (
-    read_snirf, load_bids_nirs, snirf_to_dot_jax, SnirfData, BidsNirsRun,
+    read_snirf, load_bids_nirs, snirf_to_dot_jax, snirf_td_moments,
+    SnirfData, BidsNirsRun,
     read_jmesh, fetch_neurojson, get_mcx_optical_properties, load_brain_mesh,
 )
 from .hemodynamics import (
@@ -26,5 +27,8 @@ from .hemodynamics import (
 from .mesh import smooth_on_mesh
 from .recon import compute_lcurve, select_lambda_lcurve, select_lambda_gcv, solve_dual, reconstruct_image
 from .spectral import normalize_jacobian
-from .td_forward import assemble_mass_time, td_source_pulse, td_forward_cw, dtof_moments
+from .td_forward import (
+    assemble_mass_time, td_source_pulse, td_forward_cw, dtof_moments,
+    compute_moment_jacobian, reconstruct_td, reconstruct_td_dual,
+)
 from .realtime import RealtimePipeline, EpochAccumulator
